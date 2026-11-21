@@ -141,15 +141,29 @@ def patch_map(z: np.ndarray, method: str) -> tuple[np.ndarray, dict[str, Any]]:
     return np.clip(p, 0.0, 1.0).astype(np.float32), {"rect": [int(y0), int(y1), int(x0), int(x1)], "scan_score": round(float(score), 3)}
 
 
-def run_split(split: str, rows: list[dict[str, Any]], cache: FeatureCache, use_matched: bool, hole_z: float):
+def acontrario_evidence(ac: dict[str, Any]) -> np.ndarray:
+    """Random-key calibrated z-map (wl.acontrario), re-centred within the image like `evidence_map`."""
+    return _smooth3(robust_z(np.asarray(ac["z128"], dtype=np.float64)))
+
+
+def run_split(split: str, rows: list[dict[str, Any]], cache: FeatureCache, use_matched: bool, hole_z: float, evidence: str = "agreement"):
+    from wl.acontrario import load_ac
+
     names, full_probs, patch_probs, info, missing = [], [], [], {}, 0
     for row in rows:
         n = row["image_name"]
-        feats = cache.load(split, n)
-        if feats is None:
-            missing += 1
-            continue
-        z = evidence_map(feats, use_matched)
+        if evidence == "acontrario":
+            ac = load_ac(split, n)
+            if ac is None:
+                missing += 1
+                continue
+            z = acontrario_evidence(ac)
+        else:
+            feats = cache.load(split, n)
+            if feats is None:
+                missing += 1
+                continue
+            z = evidence_map(feats, use_matched)
         pm, meta = patch_map(z, row["method"])
         names.append(n)
         full_probs.append(full_map(z, hole_z))
@@ -165,6 +179,8 @@ def main() -> None:
     ap.add_argument("--id-full", default="E125_scan_full")
     ap.add_argument("--id-patch", default="E126_scan_patch")
     ap.add_argument("--use-matched", action="store_true", help="Average agreement and matched-filter evidence")
+    ap.add_argument("--evidence", choices=["agreement", "acontrario"], default="agreement",
+                    help="agreement: cached agreement maps; acontrario: random-key calibrated z-maps (wl.acontrario)")
     ap.add_argument("--hole-z", type=float, default=2.0, help="Fixed z threshold for holes (not tuned on labels)")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--cache", default=str(ROOT_DIR / "output" / "cache" / "features"))
@@ -179,10 +195,10 @@ def main() -> None:
     if args.limit:
         train_rows, test_rows = train_rows[: args.limit], test_rows[: args.limit]
 
-    tr = run_split("train", train_rows, cache, args.use_matched, args.hole_z)
-    te = run_split("test", test_rows, cache, args.use_matched, args.hole_z)
+    tr = run_split("train", train_rows, cache, args.use_matched, args.hole_z, args.evidence)
+    te = run_split("test", test_rows, cache, args.use_matched, args.hole_z, args.evidence)
 
-    params = {"use_matched": args.use_matched, "hole_z": args.hole_z, "trained_on_labels": False}
+    params = {"evidence": args.evidence, "use_matched": args.use_matched, "hole_z": args.hole_z, "trained_on_labels": False}
     for exp_id, k in ((args.id_full, 1), (args.id_patch, 2)):
         out_dir = Path(args.out) / exp_id
         out_dir.mkdir(parents=True, exist_ok=True)

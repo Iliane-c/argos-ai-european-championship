@@ -62,15 +62,23 @@ def image_features(feats: dict[str, Any]) -> np.ndarray:
     )
 
 
-def load_split_features(cache: FeatureCache, split: str, names: list[str]) -> tuple[np.ndarray, list[str]]:
+def load_split_features(cache: FeatureCache, split: str, names: list[str], use_ac: bool = False) -> tuple[np.ndarray, list[str]]:
+    from wl.acontrario import load_ac
+
+    n_feat = len(FEATURE_NAMES) + (2 if use_ac else 0)
     rows, missing = [], []
     for n in names:
         f = cache.load(split, n)
-        if f is None:
+        ac = load_ac(split, n) if use_ac else None
+        if f is None or (use_ac and ac is None):
             missing.append(n)
-            rows.append(np.full(len(FEATURE_NAMES), np.nan))
-        else:
-            rows.append(image_features(f))
+            rows.append(np.full(n_feat, np.nan))
+            continue
+        x = image_features(f)
+        if use_ac:
+            # Global random-key z-score and the share of significant cells (z > 2) in the image.
+            x = np.concatenate([x, [ac["z_global"], float((ac["z128"] > 2.0).mean())]])
+        rows.append(x)
     return np.stack(rows), missing
 
 
@@ -142,7 +150,7 @@ def fit_kind_models(
         report[m] = {"oof_kind_acc": round(acc, 4), "n": int(sel.sum())}
     report["all"] = {"oof_kind_acc": round(float(((oof >= 0.5) == (y == 1)).mean()), 4)}
     report["weights"] = {m: [round(float(v), 3) for v in full_models[m].w] for m in METHODS}
-    report["feature_order"] = ["bias", *FEATURE_NAMES]
+    report["feature_order"] = ["bias", *FEATURE_NAMES] + (["z_global", "frac_z_gt_2"] if x_train.shape[1] > len(FEATURE_NAMES) else [])
     return oof, full_models, report
 
 
@@ -192,6 +200,7 @@ def main() -> None:
     ap.add_argument("--patch-src", default="const", help="'const' or experiment ID used for images predicted patch")
     ap.add_argument("--soft", action="store_true", help="Blend sources with p(full) instead of a hard switch")
     ap.add_argument("--l2", type=float, default=1.0)
+    ap.add_argument("--ac", action="store_true", help="Add a-contrario features (global random-key z, share of z>2 cells)")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--cache", default=str(ROOT_DIR / "output" / "cache" / "features"))
     ap.add_argument("--out", default=str(ROOT_DIR / "output"))
@@ -209,8 +218,8 @@ def main() -> None:
     test_names = [r["image_name"] for r in test_meta]
     test_methods = np.array([r["method"] for r in test_meta])
 
-    x_train, miss_tr = load_split_features(cache, "train", train_names)
-    x_test, miss_te = load_split_features(cache, "test", test_names)
+    x_train, miss_tr = load_split_features(cache, "train", train_names, args.ac)
+    x_test, miss_te = load_split_features(cache, "test", test_names, args.ac)
     if miss_tr or miss_te:
         frac = (len(miss_tr) + len(miss_te)) / (len(train_names) + len(test_names))
         msg = (f"missing cached features: train={len(miss_tr)}/{len(train_names)} "

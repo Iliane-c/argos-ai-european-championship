@@ -1,0 +1,9 @@
+id: E171_segb2_v2
+parent: E170_segb5_v2
+# One change vs. E170: SegFormer-B2 (fast). Against E104 (0.626, synth-v1) it measures synth-v2 + fixes.
+model:
+  encoder: mit_b2
+train:
+  epochs: 30
+  batch: 16
+  lr: 2.0e-4

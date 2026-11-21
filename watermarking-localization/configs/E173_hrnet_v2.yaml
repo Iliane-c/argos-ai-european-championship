@@ -1,0 +1,13 @@
+id: E173_hrnet_v2
+parent: E170_segb5_v2
+# One change vs. E170: HRNet-W48 + FPN (keeps a stride-2/4 stream at full width, suited to faint
+# pixel-level patterns). Architecture diversity for the ensemble.
+model:
+  name: timm_fpn
+  encoder: hrnet_w48
+  pretrained: true
+  feat_dim: 128
+train:
+  epochs: 20
+  batch: 8
+  lr: 2.0e-4

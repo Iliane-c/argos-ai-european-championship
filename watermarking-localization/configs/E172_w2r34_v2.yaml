@@ -1,0 +1,13 @@
+id: E172_w2r34_v2
+parent: E103_w2_wam_multitask
+# One change vs. E103 (0.624): synth-v2 instead of synth-v1, longer schedule. CNN member for the ensemble;
+# its per-pixel bit head forces watermark-sensitive features.
+data:
+  train: [real, synth-v2]
+  synth_ratio: 0.85
+  epoch_samples: 8000
+train:
+  epochs: 35
+  workers: 6
+post:
+  threshold: oof

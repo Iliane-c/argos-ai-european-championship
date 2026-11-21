@@ -206,7 +206,9 @@ class CleanImagePool:
         folds_path: str | Path = ROOT_DIR / "splits" / "folds.json",
         train_folds: Sequence[int] = (1, 2, 3, 4),
         clean_dir: str | Path | None = None,
+        external_prob: float = 0.7,
     ):
+        self.external_prob = float(external_prob)
         self.external_paths: list[Path] = []
         self.real_patch_entries: list[tuple[Path, Path]] = []
 
@@ -233,9 +235,15 @@ class CleanImagePool:
                     self.real_patch_entries.append((img_p, msk_p))
 
     def sample(self, rng: np.random.Generator) -> tuple[np.ndarray, str]:
-        if self.external_paths and (not self.real_patch_entries or rng.random() < 0.7):
+        if self.external_paths and (not self.real_patch_entries or rng.random() < self.external_prob):
             p = self.external_paths[int(rng.integers(0, len(self.external_paths)))]
-            pil = Image.open(p).convert("RGB").resize((IMG_SIZE, IMG_SIZE), Image.Resampling.BICUBIC)
+            pil = Image.open(p).convert("RGB")
+            # Random square crop keeps the aspect ratio; resizing a whole 4:3 photo would stretch it.
+            w, h = pil.size
+            side = max(1, int(min(w, h) * float(rng.uniform(0.6, 1.0))))
+            x0 = int(rng.integers(0, w - side + 1))
+            y0 = int(rng.integers(0, h - side + 1))
+            pil = pil.crop((x0, y0, x0 + side, y0 + side)).resize((IMG_SIZE, IMG_SIZE), Image.Resampling.LANCZOS)
             return np.asarray(pil, dtype=np.uint8), f"ext:{p.name}"
 
         if self.real_patch_entries:
@@ -281,6 +289,34 @@ def _feather_alpha(mask_crop: np.ndarray, feather_px: int) -> np.ndarray:
     return (np.asarray(pil, dtype=np.float32) / 255.0) * mask_crop.astype(np.float32)
 
 
+HOLE_FILLS = ("restore", "paste", "inpaint")
+
+
+def _hole_fill(
+    mode: str,
+    clean_aug: np.ndarray,
+    wm_full: np.ndarray,
+    hole: np.ndarray,
+    alt_img: np.ndarray | None,
+) -> np.ndarray:
+    """Content placed in the clean holes of a `full` image, one per real edit type.
+
+    restore: the original unwatermarked pixels (alteration; seamless, the hardest case).
+    paste:   pixels of another clean image (object addition).
+    inpaint: OpenCV inpainting from the watermarked surroundings (object removal).
+    """
+    if mode == "paste" and alt_img is not None:
+        return alt_img
+    if mode == "inpaint":
+        try:
+            import cv2
+
+            return cv2.inpaint(wm_full, hole.astype(np.uint8) * 255, 5, cv2.INPAINT_TELEA)
+        except ImportError:
+            pass
+    return clean_aug
+
+
 def synthesize_one(
     clean_img: np.ndarray,
     method: str,
@@ -289,8 +325,13 @@ def synthesize_one(
     mask_lib: MaskLibrary,
     rng: np.random.Generator,
     source: str = "synth",
+    alt_img: np.ndarray | None = None,
+    fill_probs: Sequence[float] = (1.0, 0.0, 0.0),
 ) -> dict[str, Any]:
-    """Synthesize a single watermarked training example matching the task data generation."""
+    """Synthesize a single watermarked training example matching the task data generation.
+
+    `fill_probs` weights the `full`-image hole fills in HOLE_FILLS order; `alt_img` feeds "paste".
+    """
     clean_aug = augment_clean_before_embed(clean_img, rng)
     bits = rng.integers(0, 2, size=NBITS[method], dtype=np.uint8)
     target_mask, (y0, y1, x0, x1) = mask_lib.sample_target_mask(method, kind, rng)
@@ -298,7 +339,11 @@ def synthesize_one(
     if kind == "full":
         wm_full = wm_model.embed(clean_aug, bits)
         mask512 = (1 - target_mask).astype(np.uint8)
-        img_out = np.where(mask512[:, :, None] == 1, wm_full, clean_aug)
+        probs = np.asarray(fill_probs, dtype=np.float64)
+        mode = HOLE_FILLS[int(rng.choice(len(HOLE_FILLS), p=probs / probs.sum()))]
+        fill = _hole_fill(mode, clean_aug, wm_full, target_mask, alt_img)
+        img_out = np.where(mask512[:, :, None] == 1, wm_full, fill)
+        source = f"{source}|{mode}"
     else:
         crop = clean_aug[y0:y1, x0:x1]
         wm_crop = wm_model.embed(crop, bits)
@@ -333,6 +378,8 @@ def generate_shards(
     methods: Sequence[str] = METHODS,
     mock_embed: bool = False,
     shard_prefix: str = "shard",
+    external_prob: float = 0.7,
+    fill_probs: Sequence[float] = (1.0, 0.0, 0.0),
 ) -> list[Path]:
     """Generate compressed .npz shards following the standard training shard schema."""
     out_path = Path(out_dir)
@@ -341,8 +388,15 @@ def generate_shards(
     folds_path = ROOT_DIR / "splits" / "folds.json"
     mask_lib = MaskLibrary(data_root=data_root, folds_path=folds_path, train_folds=train_folds)
     clean_pool = CleanImagePool(
-        data_root=data_root, folds_path=folds_path, train_folds=train_folds, clean_dir=clean_dir
+        data_root=data_root,
+        folds_path=folds_path,
+        train_folds=train_folds,
+        clean_dir=clean_dir,
+        external_prob=external_prob,
     )
+    if clean_dir is not None and not clean_pool.external_paths:
+        raise FileNotFoundError(f"--clean-dir {clean_dir} has no .png/.jpg/.jpeg/.webp images")
+    needs_alt = float(fill_probs[1]) > 0.0
 
     if mock_embed:
         wm_models = {m: _MockWatermarker(m) for m in methods}
@@ -379,7 +433,11 @@ def generate_shards(
 
     for method, kind in specs:
         clean_img, src = clean_pool.sample(rng)
-        sample = synthesize_one(clean_img, method, kind, wm_models[method], mask_lib, rng, source=src)
+        alt_img = clean_pool.sample(rng)[0] if kind == "full" and needs_alt else None
+        sample = synthesize_one(
+            clean_img, method, kind, wm_models[method], mask_lib, rng,
+            source=src, alt_img=alt_img, fill_probs=fill_probs,
+        )
         buf.append(sample)
         if len(buf) >= shard_size:
             _flush()
@@ -400,6 +458,10 @@ def main() -> None:
     ap.add_argument("--methods", nargs="+", default=list(METHODS))
     ap.add_argument("--shard-prefix", default="shard", help="Filename prefix for shard files")
     ap.add_argument("--mock-embed", action="store_true", help="Use mock embedder for offline tests")
+    ap.add_argument("--external-prob", type=float, default=0.7,
+                    help="Share of clean bases drawn from --clean-dir (rest: scrubbed real patch images)")
+    ap.add_argument("--fill-probs", type=float, nargs=3, default=[1.0, 0.0, 0.0],
+                    metavar=("RESTORE", "PASTE", "INPAINT"), help="Hole fill mix for `full` images")
     args = ap.parse_args()
 
     shards = generate_shards(
@@ -414,6 +476,8 @@ def main() -> None:
         methods=args.methods,
         mock_embed=args.mock_embed,
         shard_prefix=args.shard_prefix,
+        external_prob=args.external_prob,
+        fill_probs=args.fill_probs,
     )
     print(f"Wrote {len(shards)} shards to {args.out}")
 

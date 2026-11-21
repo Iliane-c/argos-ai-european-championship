@@ -1,0 +1,11 @@
+# Dataset, starter kit, model weights and outputs are downloaded or generated; never commit them.
+data/
+kit/
+models/
+release/
+output/
+.venv/
+*.zip
+*.pt
+*.pth
+*.onnx

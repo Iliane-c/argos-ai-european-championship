@@ -77,6 +77,8 @@ def main() -> None:
     ap.add_argument("--configs-out", default=str(ROOT_DIR / "configs"))
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--max-concurrent", type=int, default=4)
+    ap.add_argument("--mode", choices=["node", "array"], default="node", help="node: pack 4 GPUs on 1 node via jobs/run_node.sh; array: 1-GPU Slurm job array")
+    ap.add_argument("--time", default="04:00:00", help="Walltime for node mode")
     ap.add_argument("--submit", action="store_true", help="Immediately submit via sbatch")
     args = ap.parse_args()
 
@@ -89,7 +91,10 @@ def main() -> None:
         manifest_out=args.manifest,
     )
     print(f"Generated {len(cfgs)} configs; manifest: {man}")
-    cmd = ["sbatch", f"--array=0-{len(cfgs) - 1}%{args.max_concurrent}", "jobs/run.sh", str(man)]
+    if args.mode == "node":
+        cmd = ["sbatch", f"--job-name=sweep_{args.prefix}{args.start_id}", f"--time={args.time}", "jobs/run_node.sh", str(man)]
+    else:
+        cmd = ["sbatch", f"--array=0-{len(cfgs) - 1}%{args.max_concurrent}", "jobs/run.sh", str(man)]
     print("Launch command:", " ".join(cmd))
     if args.submit:
         subprocess.run(cmd, check=True)

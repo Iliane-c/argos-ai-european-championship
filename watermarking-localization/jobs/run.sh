@@ -12,8 +12,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Under sbatch, Slurm runs a copy of this script from /var/spool/slurmd, so BASH_SOURCE does not point
+# into the repo. Use the submit directory there (all submitters cd to the repo root first).
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    ROOT_DIR="$SLURM_SUBMIT_DIR"
+else
+    ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$ROOT_DIR"
 mkdir -p output
 

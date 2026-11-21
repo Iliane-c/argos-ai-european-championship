@@ -212,7 +212,12 @@ def main() -> None:
     x_train, miss_tr = load_split_features(cache, "train", train_names)
     x_test, miss_te = load_split_features(cache, "test", test_names)
     if miss_tr or miss_te:
-        print(f"WARNING: missing cached features: train={len(miss_tr)} test={len(miss_te)} (treated as NaN)")
+        frac = (len(miss_tr) + len(miss_te)) / (len(train_names) + len(test_names))
+        msg = (f"missing cached features: train={len(miss_tr)}/{len(train_names)} "
+               f"test={len(miss_te)}/{len(test_names)} in {args.cache}")
+        if frac > 0.05:
+            raise SystemExit(f"ERROR: {msg}. Run `python -m wl.features --split train|test --device cuda` first.")
+        print(f"WARNING: {msg} (treated as NaN)")
 
     oof, models, report = fit_kind_models(train_names, x_train, meta_by_name, folds, args.l2)
     p_test = np.zeros(len(test_names))

@@ -1,0 +1,6 @@
+Sat Nov 21 10:46:14 PM CET 2026 waiting until 23:10 Paris
+===== 2026-11-21 23:10:00 CET  queue/v1.csv
+Submitting current.csv to 33-model-equality. Scoring can take a few minutes...
+Score (public split): 0.1
+New best on this task. Score shown is on the public split; the final ranking uses the held out subset, revealed after submissions close.
+

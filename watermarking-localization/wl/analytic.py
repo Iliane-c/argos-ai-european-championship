@@ -165,7 +165,9 @@ def predict_analytic_t1(
 def _generate_candidate_boxes(method: str, step: int = 16) -> list[tuple[int, int, int, int]]:
     max_aspect = MAX_ASPECT[method]
     boxes: list[tuple[int, int, int, int]] = []
-    sizes = [16, 24, 32, 48, 64, 96]
+    # Thin strips (up to 16:1) and small patches (< 64 px) must be reachable:
+    # median patch area is ~4 % (~25x25 cells), minimum ~0.3 % (~7x7 cells).
+    sizes = [6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
     for h in sizes:
         for w in sizes:
             if max(h, w) / min(h, w) > max_aspect:
@@ -228,7 +230,7 @@ def rectangle_search_single(
 
     coarse_boxes = _generate_candidate_boxes(method, step=16)
     coarse_scores = _score_boxes_batched(img_uint8, coarse_boxes, signed_msg, wm_model)
-    top_idx = np.argsort(coarse_scores)[::-1][:3]
+    top_idx = np.argsort(coarse_scores)[::-1][:5]
 
     fine_boxes_set: set[tuple[int, int, int, int]] = set()
     max_aspect = MAX_ASPECT[method]
@@ -239,8 +241,8 @@ def rectangle_search_single(
             for dx in (-8, -4, 0, 4, 8):
                 for dh in (-4, 0, 4):
                     for dw in (-4, 0, 4):
-                        nh = int(np.clip(h + dh, 12, 112))
-                        nw = int(np.clip(w + dw, 12, 112))
+                        nh = int(np.clip(h + dh, 4, GRID))
+                        nw = int(np.clip(w + dw, 4, GRID))
                         if max(nh, nw) / min(nh, nw) > max_aspect:
                             continue
                         ny0 = int(np.clip(y0 + dy, 0, GRID - nh))

@@ -1,0 +1,4 @@
+id: E142_w2_long
+parent: E103_w2_wam_multitask
+train:
+  epochs: 50

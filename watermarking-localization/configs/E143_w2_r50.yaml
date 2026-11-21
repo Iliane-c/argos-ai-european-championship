@@ -1,0 +1,4 @@
+id: E143_w2_r50
+parent: E103_w2_wam_multitask
+model:
+  encoder: resnet50

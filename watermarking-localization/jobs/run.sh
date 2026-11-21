@@ -38,8 +38,8 @@ fi
 
 echo "[$(date -Is)] Running config: $CFG (task=${SLURM_ARRAY_TASK_ID:-single})"
 
-MODEL_NAME="$(python -c "from wl import load_config; print(load_config('$CFG').get('model', {}).get('name', ''))")"
-EXP_ID="$(python -c "from wl import load_config; print(load_config('$CFG').get('id', 'run'))")"
+MODEL_NAME="$(python -c "import sys; from wl import load_config; ov=[a for a in sys.argv[2:] if '=' in a and not a.startswith('-')]; print(load_config(sys.argv[1], overrides=ov).get('model', {}).get('name', ''))" "$CFG" "$@")"
+EXP_ID="$(python -c "import sys; from wl import load_config; ov=[a for a in sys.argv[2:] if '=' in a and not a.startswith('-')]; print(load_config(sys.argv[1], overrides=ov).get('id', 'run'))" "$CFG" "$@")"
 
 if [[ "$MODEL_NAME" == "analytic" ]]; then
     python -m wl.analytic --config "$CFG" --device cuda "$@"

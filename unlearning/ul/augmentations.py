@@ -83,7 +83,8 @@ def patch_mask(
     num_patches = gh * gw
     num_keep = max(1, int(round(num_patches * (1.0 - mask_ratio))))
 
-    scores = torch.rand(b, num_patches, device=x01.device, generator=generator)
+    gen_dev = generator.device if generator is not None else x01.device
+    scores = torch.rand(b, num_patches, device=gen_dev, generator=generator).to(x01.device)
     keep_idx = scores.argsort(dim=1)[:, :num_keep]
     mask = torch.zeros(b, num_patches, device=x01.device, dtype=x01.dtype)
     mask.scatter_(1, keep_idx, 1.0)

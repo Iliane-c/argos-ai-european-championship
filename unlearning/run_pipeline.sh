@@ -14,7 +14,7 @@
 #   MODE                full (default, competition quality) | fast (Colab T4 friendly) | smoke (tiny dry-run).
 #   STAGES              all (default) or comma-separated subset of:
 #                       diagnose,retain,shadow,oracle,wave1,wave2,soup
-#   SKIP_SHADOW         0 (default) | 1 (skip Shadow-Gold training to save GPU time).
+#   SKIP_SHADOW         1 (default: skip noisy from-scratch Shadow-Gold) | 0 (enable Shadow-Gold).
 #   FORCE               0 (default, skip stages whose outputs exist so reruns resume) | 1 (overwrite all).
 #   DEVICE              auto (default) | cuda | cpu.
 #   AMP                 auto (default: bf16 on Ampere+, fp16 on T4/Volta, fp32 on CPU) | bf16 | fp16 | fp32.
@@ -34,7 +34,7 @@ TASK_DIR="${TASK_DIR:-$PWD}"
 OUT_DIR="${OUT_DIR:-$TASK_DIR/output/hybrid}"
 MODE="${MODE:-full}"
 STAGES="${STAGES:-all}"
-SKIP_SHADOW="${SKIP_SHADOW:-0}"
+SKIP_SHADOW="${SKIP_SHADOW:-1}"
 FORCE="${FORCE:-0}"
 AUTO_DOWNLOAD_COCO="${AUTO_DOWNLOAD_COCO:-1}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-0}"
@@ -366,7 +366,7 @@ if stage_enabled oracle; then
         echo ""
         echo ">>> [Stage 3/6] Build Memorization & OOF Oracle (build_oracle.py)"
         ORACLE_EXTRA=()
-        [[ -f "$SHADOW_GOLD" ]] && ORACLE_EXTRA+=(--shadow-gold "$SHADOW_GOLD")
+        [[ "$SKIP_SHADOW" != "1" && -f "$SHADOW_GOLD" ]] && ORACLE_EXTRA+=(--shadow-gold "$SHADOW_GOLD")
         [[ -n "${EXT_EMBEDDINGS:-}" && -f "${EXT_EMBEDDINGS}" ]] && ORACLE_EXTRA+=(--ext-embeddings "$EXT_EMBEDDINGS")
         run_ul build_oracle.py \
             --task-dir "$TASK_DIR" \
@@ -384,7 +384,7 @@ fi
 SHARED_OPT=()
 [[ -f "$RETAIN_AUDIT_FILE" ]] && SHARED_OPT+=(--retain-audit "$RETAIN_AUDIT_FILE")
 [[ -f "$ORACLE_FILE" ]] && SHARED_OPT+=(--oracle "$ORACLE_FILE")
-[[ -f "$SHADOW_GOLD" ]] && SHARED_OPT+=(--shadow-gold "$SHADOW_GOLD")
+[[ "$SKIP_SHADOW" != "1" && -f "$SHADOW_GOLD" ]] && SHARED_OPT+=(--shadow-gold "$SHADOW_GOLD")
 
 # ---------------------------------------------------------------------------
 # Stage 4: Wave 1 — K-Fold Cross-Fitted TIES + SalUn Late-MLP
@@ -568,7 +568,7 @@ if stage_enabled soup; then
     echo ">>> [Stage 6/6] Multi-Branch Weight Soup & Submission Export (soup_and_eval.py)"
     SOUP_EXTRA=()
     [[ -f "$RETAIN_AUDIT_FILE" ]] && SOUP_EXTRA+=(--retain-audit "$RETAIN_AUDIT_FILE")
-    [[ -f "$SHADOW_GOLD" ]] && SOUP_EXTRA+=(--shadow-gold "$SHADOW_GOLD")
+    [[ "$SKIP_SHADOW" != "1" && -f "$SHADOW_GOLD" ]] && SOUP_EXTRA+=(--shadow-gold "$SHADOW_GOLD")
 
     run_ul soup_and_eval.py \
         --task-dir "$TASK_DIR" \

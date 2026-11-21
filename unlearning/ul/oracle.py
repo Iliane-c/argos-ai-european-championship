@@ -101,7 +101,7 @@ def compute_memorization_scores(
 
     # 1. Augmentation & patch-mask fragility
     eval_views = build_eval_alterations(patch_size=patch_size)
-    gen_mask = torch.Generator().manual_seed(seed + 11)
+    gen_mask = torch.Generator(device=device).manual_seed(seed + 11)
     corrupt_fns = [
         eval_views["blur5"],
         eval_views["crop85"],

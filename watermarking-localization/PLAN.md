@@ -1,186 +1,231 @@
-# Watermark Localization: Shared Plan (2 people)
+# Watermark Localization: Shared Plan
 
-Results and the backlog live in [EXPERIMENTS.md](EXPERIMENTS.md). This file says **who does what, how we
-evaluate, and how we run experiments in parallel**.
+Results, the backlog and decisions live in [EXPERIMENTS.md](EXPERIMENTS.md). This file explains **how we
+work**: build a base library once, then run many experiments in parallel, both of us, in rounds.
 
 The hackathon ends **Sun 22 Nov, 12:00**. The final submission is due by **11:00**.
 
-## 0. In short
+## 0. How we work
 
-- **Main approach:** a segmentation network. It takes the 512 x 512 image and outputs a 128 x 128 mask
-  (1 = watermarked). We train it on the 510 real train images plus **synthetic images we create with the
-  starter-kit embedders**, which gives unlimited labelled data.
-- **Evaluation:** a fixed 5-fold split of the real train images (`splits/folds.json`). Fold 0 is for quick
-  checks; all 5 folds are for final choices. The public leaderboard is only a sanity check.
-- **Two roles:**
-  - **A = Data & Evaluation:** evaluation script, synthetic data, augmentation, extra input channels.
-  - **B = Models & Training:** training script, architectures, losses, post-processing, ensembles.
-- **Rhythm:** each person keeps up to 4 GPU jobs running. We meet at fixed sync times (Section 7), read
-  `EXPERIMENTS.md` together, keep or drop, and launch the next batch.
+1. **Build the base library together (about 3 h).** We split it by module only to go faster (Section 2).
+   Nobody owns an experiment area.
+2. **Run experiments in rounds.** Either of us can run anything from the backlog:
+   1. Claim a row in EXPERIMENTS.md.
+   2. Write a config file.
+   3. Launch it.
+   4. At the next sync, compare and decide what to do next.
+3. **Everything outputs the same file**: 128 x 128 probabilities per image. Trained models, training-free
+   methods and ensembles all go through the same evaluation and can be mixed freely.
 
-## 1. The task as a segmentation problem
+## 1. The problem in one screen
 
 ```
-image 512x512 (+ method, + message)  -->  segmentation model  -->  128x128 probabilities  -->  threshold  -->  mask
+image 512x512 + method + message  -->  [model or training-free method]  -->  128x128 probabilities  -->  threshold  -->  mask
 ```
 
-- **Train target:** the official `mask128` from the train set (a cell is 1 if at least 8 of its 4 x 4
-  pixels are watermarked). Then no conversion step is needed.
-- **Score:** per image, the mean of IoU(clean) and IoU(watermarked), then the mean over images. The
-  official function is `kit/wmloc/utils.py: miou_image`.
+- **Train target:** the official `mask128` (a cell is 1 if at least 8 of its 4 x 4 pixels are
+  watermarked).
+- **Score:** per image, the mean of IoU(clean) and IoU(watermarked); then the mean over images
+  (`kit/wmloc/utils.py`).
+- **Data details:** `uv run analysis/explore_dataset.py` writes them to `output/explore/`.
 
-What the data looks like (details: `uv run analysis/explore_dataset.py`, which writes `output/explore/`):
-
-| kind (train flag `full_watermark`) | share | watermarked area | what the model must find |
+| kind (train flag) | share | watermarked area | what must be found |
 |---|---|---|---|
-| `full` | 50 % | 51–100 % (median 94 %) | **clean holes** where objects were removed or added (median 6 %). Silhouettes and blobs, often in several pieces, often at the border. |
-| `patch` | 50 % | 0.3–44 % (median 4 %) | **a watermarked patch**. Half are exact rectangles (thin strips up to 16:1), half are object shapes. |
+| `full` | 50 % | 51–100 %, median 94 % | **clean holes** (median 6 %): object silhouettes or blobs, often several, often at the border |
+| `patch` | 50 % | 0.3–44 %, median 4 % | **a watermarked patch**: half rectangles (strips up to 16:1), half objects |
 
-- **The three methods have the same statistics.** Test: 340 images per method, with no kind flag and no
-  mask.
-- **The small part is half the score.** If the model marks nothing there, that half is 0. This explains
-  the baseline numbers in EXPERIMENTS.md (E00).
-- **The watermark is a faint pixel-level pattern.** So **never downscale the input below 512**, and treat
-  any resize of a watermarked image as harmful (Section 4).
+- The three methods have the same statistics.
+- Test: 1,020 images, 340 per method, with no kind flag.
+- The small part is half of every image's score (see E00 in EXPERIMENTS.md).
+- The watermark is a faint **pixel-level** pattern. It was computed at the method's processing resolution
+  (256 for PixelSeal and TrustMark, 400 for StegaStamp), then resized to the watermarked box.
 
-## 2. Who does what
+## 2. Base library (build first, then freeze the interfaces)
 
-| | **A: Data & Evaluation** | **B: Models & Training** |
-|---|---|---|
-| first hour | `eval.py`, loader for real data, E00 and E01 | `train.py` (config-driven), smoke test of a U-Net on fold 0 |
-| main work | synthetic generator, augmentation, extra input channels, kind feature | architecture sweep, losses, per-method vs shared models |
-| end game | threshold choice by CV, post-processing | ensembling, test inference, submission file |
-| experiments | data side: "same model, different data" | model side: "same data, different model" |
-
-**Interface: agree on this in the first hour, then never break it.**
-
-| what | format | path |
-|---|---|---|
-| fold split | `{"n_folds": 5, "folds": [[names...], ...]}` (already committed) | `splits/folds.json` |
-| training data shard | `.npz` with `image` uint8 [N,512,512,3], `mask128` uint8 [N,128,128], `method`, `message`, `kind`, `source` (`real` / `synth-v1` / ...) | `data/synth/<version>/shard_XXX.npz` (git-ignored) |
-| predictions | `.npz` with `names` [N] and `probs` float16 [N,128,128] (probability of watermarked) | `output/<ID>_<name>/val_probs.npz`, `test_probs.npz` |
-| metrics | `eval.py output/<ID>_<name>` writes `metrics.json`: mean, per method, per kind, at threshold 0.5 | same folder |
-
-Keep **probabilities**, not binary masks. That makes ensembling and threshold tuning possible later
-without retraining.
-
-## 3. Evaluation protocol (against overfitting)
-
-1. **Fixed split.** `splits/folds.json` has 5 folds of 102 images (17 per method × kind). It was made by
-   `splits/make_splits.py` and must never be regenerated.
-2. **Quick experiments:** train on folds 1–4 (plus synthetic data), validate on **fold 0**. Report the
-   mean, PS / TM / SS, and Full / Patch.
-3. **Finalists:** full 5-fold CV. Report the mean ± std. A gain smaller than 1 std is noise, so keep the
-   simpler model.
-4. **Synthetic-only models** are evaluated on **all 510 real images**. This measures the synthetic-to-real
-   gap and is our most honest generalization number.
-5. **Threshold and post-processing** are chosen on out-of-fold predictions, never on the fold being
-   reported.
-6. **Public leaderboard (30 % of test, about 306 images):** submit only at syncs, to check the format and
-   that LB ≈ CV. Never pick a model because of the LB.
-7. Record every experiment, including failures, with its parent experiment, so we always know what one
-   change did.
-
-## 4. Training data: real, synthetic, augmentation
-
-### Synthetic data (A, the biggest lever)
-The kit embedders are the ones used to build the dataset, so we can recreate its process with labels for
-free:
-- **Clean images.** Use the 255 real `patch` images (clean outside their known patch) and a public image
-  set (COCO / DIV2K / Open Images, resized to 512 **before** embedding). Generated-looking images also fit,
-  because the dataset images look AI-generated.
-- **`full` recipe:**
-  1. Embed the whole image with a random message (`wm.embed`).
-  2. Choose a hole mask.
-  3. Put the clean pixels back inside the hole.
-  - v2 option: fill the hole with an inpainting model such as LaMa, because real holes are real edits (in
-    one example, cones were removed from a ski slope).
-- **`patch` recipe:**
-  1. Pick a random box. Sizes follow `output/explore/fig5`; aspect ratio ≤ 16 (≤ 2 for TrustMark).
-  2. Embed the crop at its own size and paste it back.
-  3. In 50 % of cases, keep only an object mask inside the box.
-- **Mask library:**
-  - The 510 real masks, freely flipped, rotated, shifted and scaled (masks are only shapes).
-  - Random blobs and strokes, rectangles, and COCO or SAM object masks.
-- **Labels:** `downsample_mask` from `kit/wmloc/utils.py`. Use 50 / 50 kinds and equal methods.
-- **Volume:** about 20k images per method per version. Generate them **on JURECA scratch**: the local disk
-  has about 2 GB free.
-
-### Augmentation: what is safe for a watermark
-
-| augmentation | applied to | verdict | why |
-|---|---|---|---|
-| Instagram-style filters (`pilgram` lib), color jitter, contrast, gamma, blur, JPEG, crop, flip, resize | the **clean** image, **before** embedding | ✅ safe | the watermark is added afterwards; this only diversifies content |
-| flip, rotate, shift, scale, elastic warp | the **mask** before compositing | ✅ safe | masks are just shapes |
-| copy-paste between real images (integer shift, **no resize**) | real train images | ✅ safe | it mimics object addition and transplantation exactly; labels stay correct |
-| random crops at native resolution (e.g. 384 px, no resize) | any image | ✅ safe | the pattern is untouched |
-| Instagram filters, color jitter, JPEG | a **watermarked** image (real, or synthetic after embedding) | ⚠️ A/B test only | it weakens the pattern, while test watermarks are intact |
-| flips, 90° rotations | a watermarked image | ⚠️ A/B test only | the pattern orientation never appears flipped in test |
-| resize, rescale, rotation by arbitrary angles | a watermarked image | ❌ avoid | the pattern is tied to its pixel grid; resampling destroys it |
-
-## 5. Models to try (B)
-
-All models: input 512 x 512, no downscaling, output 128 x 128 logits.
-
-| # | model | why | source | cost |
+| # | module | gives | built by | ready by |
 |---|---|---|---|---|
-| 1 | **U-Net, ResNet-34 encoder** | simple, strong baseline | `segmentation_models_pytorch` (smp) | low |
-| 2 | **SegFormer MiT-B2** (B5 later) | strong general segmenter; output stride 4 gives exactly 128 x 128 at 512 input | HF `transformers` / smp | medium |
-| 3 | UNet++, DeepLabV3+, FPN with EfficientNet-B4 or ConvNeXt-T | a sweep with one config flag | smp | low |
-| 4 | **TruFor** (Noiseprint++ + SegFormer) | top forgery-localization model; pretrained to see low-level noise traces, which is what a watermark is | github `grip-unina/TruFor` | medium |
-| 5 | IML-ViT | high-resolution ViT for manipulation localization | github `SunnyHaze/IML-ViT` | medium–high |
-| 6 | **Watermark Anything (WAM) extractor**, fine-tuned | the only public model trained to output "watermarked or not" per pixel | github `facebookresearch/watermark-anything` | medium |
-| 7 | each method's own decoder backbone + pixel head | already tuned to that exact watermark (PixelSeal ConvNeXt, TrustMark ResNet-50) | starter kit | medium |
-| + | SAM 2 as mask refiner | sharp object boundaries for object-shaped targets | post-processing | low |
+| B1 | `wl/data.py` | real dataset with folds, synthetic shard dataset, augmentation hook, extra input channels | builder 1 | 18:30 |
+| B2 | `wl/evaluate.py` | official metric; per method × kind; threshold from out-of-fold predictions; `metrics.json` | builder 2 | 18:30 |
+| B3 | `wl/models.py` | model registry (Section 5): smp (any architecture × encoder), HF / timm backbones; wrappers for extra input channels, method or message conditioning, extra heads | builder 2 | 18:30 (smp), 20:00 (rest) |
+| B4 | `wl/train.py`, `wl/losses.py` | YAML-driven training: AMP, AdamW + cosine, EMA, BCE / Dice / Lovász / auxiliary losses; writes `val_probs.npz` and `test_probs.npz` | builder 2 | 18:30 |
+| B5 | `wl/synth.py`, `wl/augment.py` | synthetic generator (Section 4), mask library, watermark-safe augmentation, copy-paste | builder 1 | 20:00 |
+| B6 | `wl/features.py` | message-aware maps: decoder agreement, matched filter, TrustMark-RM residual, SRM filters; cached per image | builder 1 | 20:00 |
+| B7 | `wl/analytic.py` | training-free localizers (Section 6) that write probabilities in the standard format | builder 1 | 21:00 |
+| B8 | `wl/postproc.py`, `wl/ensemble.py`, `predict.py` | thresholds, clean-up, ensembles, `submission.pt` + `submit()` | builder 2 | 20:00 |
+| B9 | `jobs/run.sh`, `jobs/sweep.py`, `wl/report.py`, `wl/gallery.py` | Slurm launcher, grid to job array, ranked table of all runs, worst-case image galleries | builder 2 | 20:00 |
 
-Knobs to test, one experiment each, against the best model so far:
-- **Input channels:** RGB, vs. RGB + high-pass/SRM filters, vs. RGB + **message-aware channels** from A.
-  The message-aware channels are the local correlation with `embed(x, m) − x` and the decoder's
-  per-position agreement with the known message.
-- **One model per method** vs. a shared model with a method input.
-- **Loss:** BCE + Dice vs. per-image 2-class Lovász (the closest to our metric).
-- **Kind head:** an image-level output "mostly watermarked or patch", or the whole-image decode score as
-  an input.
-- **Post-processing:**
-  - If the small part is empty, mark the top-k % cells.
-  - Snap near-rectangles to boxes.
-  - Remove specks.
+**Checkpoint at 18:30:** one tiny run goes end to end on CPU: real data, then U-Net, then probabilities,
+then `metrics.json`, then `submission.pt`. After that, interfaces only grow; nothing gets renamed.
 
-## 6. How to run an experiment
+**Standard files:**
 
-1. **Claim** a backlog row in EXPERIMENTS.md: put your name and the next free ID, then push.
-2. **Config:** `configs/E07_segformer_b2.yaml`. It holds only the differences from its parent experiment.
-3. **Launch:** `sbatch jobs/train.sh configs/E07_segformer_b2.yaml`. Each job takes 1 GPU, and one JURECA
-   node has 4 A100s, so keep **at most 4 jobs per person**.
-4. **Outputs:** the job writes `output/E07_segformer_b2/` with `config.yaml`, `log.txt`, `val_probs.npz`,
-   `metrics.json`, `test_probs.npz` and `model.pt`.
-5. **Log:** run `python eval.py output/E07_segformer_b2`, fill in the row, and give a verdict (Keep / Drop
-   / Investigate).
-6. **Commit** the config and the row as `E07: <change>`. Run `git pull --rebase` first.
+| what | format | where |
+|---|---|---|
+| folds | `splits/folds.json` (committed, never regenerated) | repo |
+| training shard | `.npz`: `image` uint8 [N,512,512,3], `mask128` uint8 [N,128,128], `method`, `message`, `kind`, `source`, optional cached feature maps | `data/synth/<version>/` |
+| predictions | `.npz`: `names` [N], `probs` float16 [N,128,128] | `output/<ID>/val_probs.npz`, `test_probs.npz` |
+| metrics | `metrics.json`: mean, PS/TM/SS, full/patch, threshold used | `output/<ID>/` |
 
-Rules:
-- One change per experiment.
-- Fixed seeds.
-- Fold 0 first; 5 folds only for finalists.
-- Before sleeping, launch the long runs.
+**An experiment is one config file**, which inherits `configs/base.yaml`:
+```yaml
+id: E104_segformer_b2_synth
+parent: E101_unet_r34
+data:  {train: [real, synth-v1], train_folds: [1, 2, 3, 4], val: f0, synth_ratio: 0.8}
+input: {channels: [rgb, srm, agreement]}          # rgb | srm | agreement | matched | native_view
+model: {name: smp, arch: Segformer, encoder: mit_b2, cond: none, heads: [mask]}   # cond: none | method | message
+loss:  {bce: 1.0, dice: 1.0, lovasz: 0.0, aux_residual: 0.0}
+train: {epochs: 20, batch: 16, lr: 3.0e-4, ema: true, seed: 0}
+post:  {threshold: oof, never_empty: true, rect_snap: false}
+```
 
-## 7. Timeline and syncs (each sync is 15 min, at a fixed time)
+## 3. Evaluation (against overfitting)
 
-| time | A: Data & Eval | B: Models | sync |
-|---|---|---|---|
-| 16:45–18:30 | `eval.py`, real-data loader, E00 ✅, E01 | `train.py` + U-Net-R34 smoke test on fold 0 (CPU is fine while compute is down) | **18:30**: interface frozen, first numbers |
-| 18:30–21:30 | synthetic generator v1 + copy-paste aug; generate synth-v1 on JURECA | architecture sweep on real data (U-Net, SegFormer-B2, UNet++-EffB4, TruFor init) | **21:30**: pick the 2 best archs |
-| 21:30–00:30 | message-aware channels; augmentation A/B tests | the 2 best archs on synth-v1 + real; loss sweep | **00:30**: first serious LB submission |
-| 00:30–08:00 | synth-v2 (fixes seen at 00:30); sleep in shifts | overnight: 5-fold finalists, per-method models | **08:00**: read the overnight results |
-| 08:00–10:30 | threshold by CV, post-processing | ensemble of finalists, test inference | **10:30**: choose the final by CV |
-| 10:30–12:00 | final submission **by 11:00**, slides | slides (6-min pitch) | end 12:00 |
+1. **Fixed split.** `splits/folds.json` has 5 folds × 102 images (17 per method × kind).
+2. **Quick runs:** train on folds 1–4 (+ synthetic), report on **fold 0**.
+3. **Finalists:** full 5-fold CV, mean ± std. A gain below 1 std is noise, so keep the simpler model.
+4. **Models trained on synthetic data only:** report on **all 510 real images**. This is the honest
+   synthetic-to-real number.
+5. **Thresholds and post-processing:** choose them on out-of-fold predictions only.
+6. **Public leaderboard (30 % of test):** submit at syncs only, to check the format and that LB ≈ CV. Never
+   pick a model because of the LB.
+7. **After every round, look at the 50 worst images** per method × kind (`wl/gallery.py`). They tell us
+   what to try next.
 
-At each sync:
-1. Read the new rows.
-2. Give each a verdict.
+## 4. Data: real, synthetic, augmentation
+
+**Synthetic data** recreates the dataset process with the kit embedders, so labels come for free:
+
+- **Clean images:**
+  - the 255 real `patch` images (clean outside their known patch);
+  - COCO / DIV2K / Open Images, resized to 512 **before** embedding;
+  - AI-generated images, because the dataset looks generated.
+- **`full` recipe:** embed the whole image with a random message, then put clean pixels back in the holes.
+  v2: fill the holes with an inpainting model (LaMa or SD-inpainting), because real holes are real edits.
+- **`patch` recipe:** embed a random box (aspect ≤ 16, ≤ 2 for TrustMark) at its own size. In half of the
+  cases, keep only an object mask inside the box. v2: outpainting and object transplantation done with
+  real editing models.
+- **Mask library:**
+  - the 510 real masks, flipped, rotated, shifted and scaled;
+  - random blobs and strokes;
+  - rectangles;
+  - COCO or SAM object masks.
+- **Volume and location:** about 20k images per method per version, generated on **JURECA scratch**. The
+  local disk has about 2 GB free.
+
+**Augmentation: which transforms keep the watermark intact**
+
+| augmentation | applied to | verdict |
+|---|---|---|
+| Instagram filters (`pilgram`), color jitter, contrast, gamma, blur, JPEG, crop, flip, resize | clean image, **before** embedding | ✅ safe: the watermark is added afterwards |
+| flip, rotate, shift, scale, elastic warp | the mask, before compositing | ✅ safe: masks are only shapes |
+| copy-paste between real images (integer shift, no resize) | real images | ✅ safe: this is exactly object addition or transplantation |
+| random crops at native resolution, integer shifts | any image | ✅ safe |
+| resize the watermarked box to the method's processing resolution | any image | ✅ useful extra view (`native_view`): this is what the decoders do |
+| filters, color jitter, JPEG | a watermarked image | ⚠️ A/B test only: weakens a pattern that test images still have intact |
+| flips, 90° rotations | a watermarked image | ⚠️ A/B test only: the pattern never appears flipped in test |
+| random rescale or arbitrary rotation | a watermarked image | ❌ avoid: the pattern is tied to its pixel grid |
+
+## 5. Model zoo (ambitious)
+
+All models take a 512 input (never downscaled) and output 128 x 128 logits. "Cost" is for one A100.
+
+**T1: fast baselines (first round)**
+- U-Net + ResNet-34 (smp): the reference.
+- SegFormer MiT-B2: its output stride 4 gives exactly 128 x 128 at 512 input.
+
+**T2: strong general segmenters**
+- SegFormer-B5; UPerNet + ConvNeXt-V2 or Swin-V2; DeepLabV3+ / UNet++ + EfficientNet-B5.
+- HRNet-W48: keeps a 1/4-resolution stream (128 x 128) through the whole network, which suits
+  pixel-level signals.
+- Mask2Former (Swin): handles holes made of several pieces. Heavy.
+
+**T3: foundation backbones, used through a dual-stream design (see W7)**
+- DINOv3 / DINOv2 ViT-B or ViT-L + DPT head, and the SAM 2.1 Hiera encoder with LoRA or adapters.
+- They give excellent object boundaries, which matters because targets are objects.
+- Their 16-px patches miss the pixel pattern, so pair them with a noise stream.
+
+**T4: forensic state of the art (made to find faint low-level traces)**
+- TruFor (Noiseprint++ + SegFormer, pretrained weights available).
+- IML-ViT, Mesorch, SparseViT, CAT-Net (HRNet).
+- Most of them are in one codebase: IMDL-BenCo.
+- Fine-tune them from their forgery-localization weights.
+
+**T5: watermark-specific architectures (our own; the most promising)**
+
+| # | architecture | idea |
+|---|---|---|
+| W1 | **Unpooled decoder** | Take the method's own extractor (PixelSeal ConvNeXt, TrustMark ResNet-50, StegaStamp via `onnx2torch`) and remove the global pooling. Its per-position bit logits are compared with the known message, giving an agreement map. A light FPN head upsamples to 128 x 128, and everything is fine-tuned on synthetic data. The backbone already "sees" the exact watermark. |
+| W2 | **WAM-style multi-task** | Per-pixel output with 1 + nbits channels: a "watermarked?" channel plus the message bits, as in Watermark Anything. Final map = detection × agreement between the predicted bits and the known message. Can also start from the WAM extractor weights. |
+| W3 | **Message-conditioned segmenter** | The message bits go through an MLP and condition the decoder (FiLM or cross-attention), as in referring segmentation. Train with the true message and with wrong messages, whose target is empty. The model learns to localize *this* message. |
+| W4 | **Reference two-stream + correlation volume** | Stream 1: the image's high-pass residual. Stream 2: the re-embedded reference `embed(x, m) − x`. A local correlation volume over small shifts and scales (as in optical-flow networks) feeds the decoder. This is a learned matched filter. |
+| W5 | **Residual-regression auxiliary head** | Also predict the watermark residual `x − c`, which is known exactly in synthetic data. This dense extra supervision sharpens the encoder. |
+| W6 | **Two-stage: box, then native scale** | Stage 1 finds the watermarked box (learned box head or analytic search). Stage 2 crops it, resizes it to the method's processing resolution (where the pattern has its native scale), segments it, and maps the result back. Mirrors how the data was made. |
+| W7 | **Dual-stream noise + semantic** | A full-resolution noise stream (SRM / Bayar constrained conv, no early stride) fused with a DINOv3 or SAM 2 semantic stream, as in TruFor. The noise stream finds the watermark; the semantic stream snaps to object boundaries. |
+| W8 | **SAM 2 refiner** | SAM 2's mask decoder (LoRA-tuned), prompted with the coarse map of the best model. Gives object-accurate masks. |
+
+**Knobs to test on the best model** (one change per experiment):
+- input channels (`rgb`, `srm`, `agreement`, `matched`, `native_view`);
+- one model per method vs. a shared model with a method input;
+- loss: BCE + Dice, per-image Lovász (closest to the metric), boundary loss;
+- an image-level kind head (`full` vs. `patch`);
+- the synthetic-to-real ratio;
+- longer schedules and EMA.
+
+**Budget per run:**
+- Quick runs: ≤ 1 h on 1 GPU.
+- Finalists: ≤ 4 h.
+- ViT-L at 512 is slow, so start with the B / S variants.
+
+## 6. Beyond training
+
+Yes, there is more than training. All of this writes the same probability files, so it can be evaluated
+and ensembled like a model.
+
+| # | idea | needs |
+|---|---|---|
+| T1 | **Training-free localizers** using the known message: decoder agreement maps (PixelSeal, TrustMark); occlusion with blurred patches (StegaStamp); matched filter; TrustMark-RM residual; whole-image decode to tell `full` from `patch`. Most of these run on CPU, so they can start **while the compute is down**. | kit models |
+| T2 | **Rectangle search:** find the box whose crop decodes the message best, then refine it to the pixel with the matched filter. Box-only gives up to 0.867 on `patch` images (E00e). | GPU for the full test set |
+| T3 | **Test-time optimization** through the differentiable decoders: refine the box or mask of the best model so the decoder evidence is maximal. Example: find the largest region that can be blurred without hurting the message likelihood (= the clean region). | GPU, moonshot |
+| T4 | **Semi-supervised on test:** pseudo-label the confident test predictions and retrain (Noisy Student). The test images are given without labels. **Ask the organizers first.** | after round 2 |
+| T5 | **Watermark-safe TTA:** average over integer pixel shifts (no flips, no resizes). | trained model |
+| T6 | **Post-processing on out-of-fold predictions:** threshold per method × kind; never leave the small part empty (mark the top-k % cells); snap near-rectangles to boxes; remove specks; SAM 2 snap. | any probabilities |
+| T7 | **Ensembles and stacking:** average probabilities; or a small CNN trained out-of-fold on [model probs + T1 maps]. | ≥ 2 runs |
+
+## 7. Running experiments in rounds
+
+**Experiment IDs:**
+- Person 1 uses **E100–E199**, Person 2 uses **E200–E299**. No ID collisions, even when we both log at
+  once.
+- E00x is for shared baselines.
+
+**Per experiment:**
+1. **Claim:** add the row with status `running` before launching, then `git pull --rebase` and push.
+2. **Config:** `configs/<ID>_<name>.yaml`. For grids, run `python jobs/sweep.py configs/<base>.yaml
+   model.encoder=resnet34,mit_b2 loss.lovasz=0,1`. It writes the configs and **one Slurm job array**.
+3. **Run:** `sbatch jobs/run.sh configs/<ID>_<name>.yaml`. One job is one GPU. Keep **≤ 4 GPU jobs per
+   person** (check the limit with the organizers). Long CPU jobs go on a CPU partition or on a laptop,
+   **never on login nodes**.
+4. **Report:** run `python -m wl.report`. It reads every `output/*/metrics.json` in the shared team folder
+   and prints a ranked table. Copy the numbers into your row and give a verdict.
+
+**Each sync (15 min):**
+1. `wl.report` + galleries.
+2. Verdicts.
 3. Update "Decisions".
-4. Each person picks the next ≤ 4 experiments.
+4. Each person claims the next ≤ 4 runs.
 5. Submit to the LB only if CV improved.
+
+| time | round | focus |
+|---|---|---|
+| 17:00–20:00 | **0: base** | build B1–B9; end-to-end CPU smoke test at 18:30; first LB submission from T1 (kind decision + agreement maps) if ready |
+| 20:00–22:30 | **1: breadth** | T1 models on real data; T1 training-free maps on all images; generate synth-v1; first W1 / W3 prototypes |
+| 22:30 sync | | keep the best 2–3 directions |
+| 22:30–01:30 | **2: scale** | real vs. synthetic; T2 / T4 backbones; message-aware inputs; W1–W5 |
+| 01:30 sync | | choose the overnight runs |
+| 01:30–08:00 | **3: overnight** | 5-fold finalists, long schedules, per-method models, W6 / W7, pseudo-labels (if allowed); sleep in shifts |
+| 08:00 sync | | read the overnight results |
+| 08:00–10:30 | **4: polish** | ensembles, stacking, TTA, post-processing, test-time refinement |
+| 10:30 | | choose the final by CV; **submit by 11:00**; slides (6-min pitch) |
 
 ## 8. Setup
 
@@ -193,7 +238,7 @@ cd watermarking-localization
 uv venv -p 3.11 .venv && source .venv/bin/activate
 uv pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
 sed 's/^onnxruntime-gpu.*/onnxruntime/' kit/requirements.txt > /tmp/req-cpu.txt
-uv pip install -r /tmp/req-cpu.txt scipy matplotlib segmentation-models-pytorch
+uv pip install -r /tmp/req-cpu.txt scipy matplotlib segmentation-models-pytorch pyyaml pilgram
 python kit/download_models.py      # into kit/models; load_watermark() finds it there
 ```
 
@@ -205,16 +250,17 @@ unzip -q data/train.zip -d data/release && unzip -q data/test.zip -d data/releas
 unzip -q data/starter_kit.zip -d kit
 ```
 
-JURECA:
-- `hackathon_setup.sh` downloads the data but creates **no venv** for this task, because the
-  `requirements.txt` is inside `starter_kit.zip`.
+JURECA (both of us need access to the shared team folder):
+- `teammate.sh` must use project `training2666`. The downloaded copy says `training2625`.
+- `hackathon_setup.sh` creates **no venv** for this task, because its `requirements.txt` is inside
+  `starter_kit.zip`.
 - Download models and weights on a **login node**, since compute nodes usually have no internet.
 
 ```bash
 cd /p/scratch/training2666/<lead>/<team>/Hackathon_Watermark_Localisation_Task
 unzip -q starter_kit.zip -d kit
 uv venv -p 3.11 .venv && source .venv/bin/activate
-uv pip install -r kit/requirements.txt scipy matplotlib segmentation-models-pytorch
+uv pip install -r kit/requirements.txt scipy matplotlib segmentation-models-pytorch pyyaml pilgram
 python kit/download_models.py
 python -c "import sys; sys.path.insert(0, 'kit'); from wmloc.watermarks import load_watermark; load_watermark('trustmark', device='cpu')"
 unzip -q train.zip -d release && unzip -q test.zip -d release
@@ -226,17 +272,30 @@ watermarking-localization/
   PLAN.md  EXPERIMENTS.md
   analysis/explore_dataset.py   dataset statistics and figures
   splits/                       make_splits.py + folds.json (fixed)
-  eval.py                       A: official metric, per method x kind
-  synth/                        A: generator + augmentation
-  train.py  configs/  jobs/     B: training, one YAML per experiment, Slurm scripts
-  predict.py                    B: test probs -> submission.pt (submit() from kit/submission_template.py)
+  wl/                           base library: data, evaluate, models, train, losses, synth, augment,
+                                features, analytic, postproc, ensemble, report, gallery
+  configs/                      base.yaml + one YAML per experiment
+  jobs/                         run.sh (1 GPU), sweep.py (grid -> job array)
+  predict.py                    probabilities -> submission.pt (+ submit())
   data/  kit/  output/          git-ignored
 ```
 
 ## References
-- PixelSeal: https://arxiv.org/abs/2512.16874 · TrustMark: https://arxiv.org/abs/2311.18297 · StegaStamp:
-  Tancik et al., CVPR 2020
-- Watermark Anything: https://arxiv.org/abs/2411.07231
-- TruFor: Guillaro et al., CVPR 2023 · IML-ViT: https://arxiv.org/abs/2307.14863
-- SegFormer: Xie et al., NeurIPS 2021 · smp: github.com/qubvel-org/segmentation_models.pytorch
-- Instagram filters for PIL: github.com/akiomik/pilgram
+- Watermarks:
+  - PixelSeal: https://arxiv.org/abs/2512.16874
+  - TrustMark: https://arxiv.org/abs/2311.18297
+  - StegaStamp: Tancik et al., CVPR 2020
+  - Watermark Anything: https://arxiv.org/abs/2411.07231
+- Segmentation:
+  - SegFormer: Xie et al., NeurIPS 2021
+  - HRNet: Wang et al., TPAMI 2020
+  - Mask2Former: Cheng et al., CVPR 2022
+  - smp: github.com/qubvel-org/segmentation_models.pytorch
+- Foundation backbones: DINOv2 / DINOv3 (Meta), SAM 2 (Meta)
+- Forensics:
+  - TruFor: Guillaro et al., CVPR 2023
+  - IML-ViT: https://arxiv.org/abs/2307.14863
+  - IMDL-BenCo codebase: github.com/scu-zjz/IMDLBenCo
+- Tools:
+  - `pilgram` (Instagram filters): github.com/akiomik/pilgram
+  - `onnx2torch`: github.com/ENOT-AutoDL/onnx2torch

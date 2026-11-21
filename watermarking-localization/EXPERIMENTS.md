@@ -1,15 +1,18 @@
 # Experiments: Task 1, Watermark Localization
 
 This is the shared experiment log for Task 1. **Newest entries first.** Add one row per experiment as soon
-as a result is available, including negative results. How we work (roles, evaluation, syncs) is in
-[PLAN.md](PLAN.md).
+as it is launched (status `running`), then fill in the result, including negative results. How we work
+(base library, evaluation, rounds) is in [PLAN.md](PLAN.md).
 
 ## Team
 
-| Role | Name | Owns |
-|---|---|---|
-| **A**: Data & Evaluation | | `eval.py`, `splits/`, `synth/` (synthetic data, augmentation, extra input channels), thresholds and post-processing |
-| **B**: Models & Training | | `train.py`, `configs/`, `jobs/`, architectures, losses, ensembling, `predict.py` |
+There are no fixed roles: either of us runs any experiment. The "builds" column only splits the base
+library (round 0).
+
+| Person | Name | Experiment IDs | Builds in round 0 |
+|---|---|---|---|
+| 1 | | E100–E199 | B1 data, B5 synth + augment, B6 features, B7 analytic |
+| 2 | | E200–E299 | B2 evaluate, B3 models, B4 train + losses, B8 postproc + ensemble + predict, B9 jobs + report + gallery |
 
 ## Task summary
 
@@ -43,79 +46,110 @@ are evaluated on a 128×128 grid.
 
 ### Working hypothesis
 
-- **Main track:** a segmentation network trained on the real images plus synthetic images made with the kit
-  embedders, validated on fixed folds (PLAN.md §3–5).
-- **Side track:** the decoder-based ideas (box decoding, per-position agreement, matched filter) give
-  message-aware maps. These maps become extra input channels for the network.
-- **E01 test:** because each watermark is generated at a fixed resolution and rescaled to its rectangle,
-  decoding the exact watermarked rectangle should give the highest bit accuracy. E01 checks this first.
+- **Main track:** segmentation networks trained on real data plus synthetic data made with the kit
+  embedders, validated on fixed folds.
+- **Most promising:** watermark-specific architectures (W1–W8 in PLAN.md §5).
+- **Training-free track:** methods that use the known message (box decoding, agreement maps, matched
+  filter). They give baselines, extra input channels and ensemble members.
+- **E01 test:** decoding the exact watermarked rectangle should give the highest bit accuracy, because each
+  watermark is generated at a fixed resolution and rescaled to its rectangle. E01 checks this first.
 
 ## Logging conventions
 
-1. Use sequential IDs (E01, E02, …). Reuse the ID in the output folder `output/E01_<short-name>/`, the
-   config `configs/E01_<short-name>.yaml` and the commit message.
-2. Write a one-sentence hypothesis: what is tested and the expected outcome.
-3. **Parent**: the experiment this one changes. Make exactly one change per experiment.
-4. **Data**:
+1. **ID:** from your own block (Person 1: E100–E199, Person 2: E200–E299; shared baselines: E00x).
+   Reuse it in `configs/<ID>_<name>.yaml`, `output/<ID>_<name>/` and the commit message.
+2. **Claim before launching:** add the row with status `running`, then `git pull --rebase` and push.
+3. **Hypothesis:** one sentence: what is tested and the expected outcome.
+4. **Parent:** the experiment this one changes. Make exactly one change.
+5. **Data:**
    - `real`: real folds 1–4.
    - `synth-vN`: synthetic version N.
    - `real+synth-vN`: both.
-5. **Val**:
+   - `none`: training-free.
+6. **Val:**
    - `f0`: real fold 0, 102 images.
    - `cv5`: 5-fold mean ± std.
-   - `all510`: all real train images. Only allowed when training used no real image.
-6. Use the official metric function (`eval.py`) at threshold 0.5, unless the row says otherwise. Report
-   PS / TM / SS, Full / Patch, and the mean.
-7. Verdict: **Keep**, **Drop** or **Investigate**, with a one-line justification. A gain below 1 CV std
-   counts as noise.
-8. Before pushing: `git pull --rebase`, then commit and push, to avoid merge conflicts.
+   - `all510`: all real train images. Only allowed when no real image was used for training or tuning.
+7. **Numbers:** from `metrics.json` (official metric, threshold 0.5 unless stated). Report PS / TM / SS,
+   Full / Patch, and the mean. Run `python -m wl.report` to rank all runs.
+8. **Verdict:** **Keep**, **Drop** or **Investigate**, with a one-line justification. A gain below 1 CV
+   std counts as noise.
 
 ## Experiment log
 
 | ID | Time | Owner | Parent | Change | Hypothesis | Data | Val | PS | TM | SS | Full | Patch | Mean | Public | Verdict |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| E01 | | A | — | Decode the ground-truth bounding box vs. the full image vs. the box shifted by 32 px (report bit accuracy, not mIoU) | The exact box yields markedly higher bit accuracy | — | all510 | | | | | | | | |
-| E00e | 11-21 | A | — | Oracle: ground-truth bounding box of the part to find | Shows how much a box-only prediction can reach | — | all510 | 0.718 | 0.692 | 0.714 | 0.549 | 0.867 | 0.708 | — | Reference (upper bound for boxes) |
-| E00d | 11-21 | A | — | Oracle: the right constant per image (all-ones for `full`, all-zeros for `patch`) | What a perfect kind classifier alone gives | — | all510 | 0.452 | 0.452 | 0.460 | 0.453 | 0.456 | 0.455 | — | Reference: the rest of the score comes from the small part |
-| E00c | 11-21 | A | — | Mean train mask per method, threshold 0.5 (in-sample) | Location prior alone | — | all510 | 0.300 | 0.308 | 0.301 | 0.277 | 0.329 | 0.303 | — | Floor |
-| E00b | 11-21 | A | — | All ones | Score floor | — | all510 | 0.247 | 0.252 | 0.246 | 0.453 | 0.044 | 0.248 | — | Floor |
-| E00a | 11-21 | A | — | All zeros | Score floor | — | all510 | 0.253 | 0.248 | 0.254 | 0.047 | 0.456 | 0.252 | — | Floor |
+| E01 | | | — | Decode the ground-truth bounding box vs. the full image vs. the box shifted by 32 px (report bit accuracy, not mIoU) | The exact box yields markedly higher bit accuracy | none | all510 | | | | | | | | |
+| E00e | 11-21 | | — | Oracle: ground-truth bounding box of the part to find | Shows how much a box-only prediction can reach | none | all510 | 0.718 | 0.692 | 0.714 | 0.549 | 0.867 | 0.708 | — | Reference (upper bound for boxes) |
+| E00d | 11-21 | | — | Oracle: the right constant per image (all-ones for `full`, all-zeros for `patch`) | What a perfect kind classifier alone gives | none | all510 | 0.452 | 0.452 | 0.460 | 0.453 | 0.456 | 0.455 | — | Reference: the rest of the score comes from the small part |
+| E00c | 11-21 | | — | Mean train mask per method, threshold 0.5 (in-sample) | Location prior alone | none | all510 | 0.300 | 0.308 | 0.301 | 0.277 | 0.329 | 0.303 | — | Floor |
+| E00b | 11-21 | | — | All ones | Score floor | none | all510 | 0.247 | 0.252 | 0.246 | 0.453 | 0.044 | 0.248 | — | Floor |
+| E00a | 11-21 | | — | All zeros | Score floor | none | all510 | 0.253 | 0.248 | 0.254 | 0.047 | 0.456 | 0.252 | — | Floor |
 
-## Backlog (by priority within each role)
+## Round 0: base library (17:00–20:00)
 
-**A: Data & Evaluation**
+| # | Module | Builder | Status |
+|---|---|---|---|
+| B1 | `wl/data.py`: real dataset with folds, shard dataset, augmentation hook, extra channels | 1 | |
+| B2 | `wl/evaluate.py`: official metric, per method × kind, out-of-fold threshold, `metrics.json` | 2 | |
+| B3 | `wl/models.py`: registry (smp, HF, timm) + wrappers (channels, method/message conditioning, extra heads) | 2 | |
+| B4 | `wl/train.py`, `wl/losses.py`: YAML-driven training, writes `val_probs` / `test_probs` | 2 | |
+| B5 | `wl/synth.py`, `wl/augment.py`: generator, mask library, watermark-safe augmentation, copy-paste | 1 | |
+| B6 | `wl/features.py`: decoder agreement, matched filter, TrustMark-RM residual, SRM; cached | 1 | |
+| B7 | `wl/analytic.py`: training-free localizers writing the standard probability files | 1 | |
+| B8 | `wl/postproc.py`, `wl/ensemble.py`, `predict.py`: thresholds, clean-up, ensembles, submission | 2 | |
+| B9 | `jobs/run.sh`, `jobs/sweep.py`, `wl/report.py`, `wl/gallery.py` | 2 | |
+| ✔ | End-to-end CPU smoke test at 18:30: real data → U-Net → probs → `metrics.json` → `submission.pt` | both | |
 
-| Priority | Idea | Target WM | Owner | Status |
-|---|---|---|---|---|
-| A1 | `eval.py` (official metric, per method × kind, writes `metrics.json`) + loader for real data with `splits/folds.json` | All | A | |
-| A2 | Synthetic generator v1: `full` = embed the whole image, put clean pixels back in holes; `patch` = embed a box at its own size, optionally keep only an object mask | All | A | |
-| A3 | Mask library: real masks (flip / rotate / shift / scale), random blobs and strokes, rectangles, COCO or SAM object masks | All | A | |
-| A4 | Copy-paste augmentation between real images (integer shift, no resize) | All | A | |
-| A5 | Augmentation A/B: Instagram filters (`pilgram`), color jitter and JPEG **before** embedding (safe) vs **after** embedding (risky) | All | A | |
-| A6 | Message-aware input channels: per-position bit agreement in extractor maps (PS, TM); matched filter `embed(x, m) − x` vs `x − denoise(x)`; residual `x − TrustMark-RM(x)` | All | A | |
-| A7 | Kind feature: whole-image decode score (`full` vs `patch`) as input or as a check | All | A | |
-| A8 | Synthetic generator v2: holes filled by an inpainting model (LaMa) for realism | All | A | |
-| A9 | Thresholds chosen on out-of-fold predictions; "never empty small part" fallback; rectangle snap; morphology | All | A | |
+## Backlog (anyone claims a row by putting their name in Owner)
 
-**B: Models & Training**
+**Data (synthetic and augmentation)**
 
-| Priority | Idea | Target WM | Owner | Status |
-|---|---|---|---|---|
-| B1 | `train.py` (YAML config, smp / HF models, writes `val_probs.npz`, `test_probs.npz`) + `jobs/train.sh` | All | B | |
-| B2 | Baseline: U-Net ResNet-34, 512 input, 128 output, BCE + Dice, real folds 1–4 → f0 | All | B | |
-| B3 | SegFormer MiT-B2 (then B5): output stride 4 gives 128×128 directly | All | B | |
-| B4 | smp sweep: UNet++ / DeepLabV3+ / FPN × EfficientNet-B4 / ConvNeXt-T | All | B | |
-| B5 | TruFor init (forgery-localization pretrained, sees noise traces) | All | B | |
-| B6 | Watermark Anything extractor fine-tuned to our 3 watermarks | All | B | |
-| B7 | The method's own decoder backbone (PixelSeal ConvNeXt, TrustMark ResNet-50) + pixel head | PS, TM | B | |
-| B8 | Input: RGB vs + SRM high-pass (KB, KV, SPAM 5×5) vs + A6 channels | All | B | |
-| B9 | One model per method vs a shared model with a method input | All | B | |
-| B10 | Loss: BCE + Dice vs per-image 2-class Lovász | All | B | |
-| B11 | Ensemble of finalists; test-time augmentation only if it keeps the watermark (no resize) | All | B | |
+| # | Idea | Owner | Status |
+|---|---|---|---|
+| D1 | synth-v1: `full` = embed the whole image + clean holes; `patch` = embed a box + optional object mask | | |
+| D2 | Real only vs real + synth-v1 vs synth-v1 only (scored on all510) | | |
+| D3 | Copy-paste between real images (integer shift, no resize) | | |
+| D4 | Instagram filters (`pilgram`) / color / JPEG **before** embedding vs **after** embedding (A/B) | | |
+| D5 | synth-v2: holes inpainted (LaMa / SD-inpaint), outpainting and transplantation done with real editing models | | |
+| D6 | Synthetic-to-real ratio and volume (5k / 20k / 50k per method) | | |
 
-**Side track (if time):** rectangle search (coarse 64 px grid, then 4 px refinement) maximizing the
-log-likelihood of the known bits; patch occlusion / input-gradient saliency; multi-scale sliding-window
-decoding + linear probe (SS); region-wise binomial p-values on known-bit agreement.
+**Models (PLAN.md §5)**
+
+| # | Idea | Owner | Status |
+|---|---|---|---|
+| M1 | T1 baselines: U-Net ResNet-34, SegFormer-B2 (real data, f0) | | |
+| M2 | T2: SegFormer-B5, UPerNet + ConvNeXt-V2 / Swin-V2, HRNet-W48, Mask2Former | | |
+| M3 | T4 forensic: TruFor fine-tune; IML-ViT / Mesorch / SparseViT via IMDL-BenCo | | |
+| M4 | Inputs: RGB vs + SRM vs + agreement / matched-filter maps vs + `native_view` | | |
+| M5 | One model per method vs a shared model with a method input | | |
+| M6 | Loss: BCE + Dice vs per-image Lovász vs + boundary loss; kind head | | |
+
+**Watermark-specific architectures (PLAN.md §5, T5)**
+
+| # | Idea | Owner | Status |
+|---|---|---|---|
+| W1 | Unpooled decoder: own extractor without pooling + message agreement + FPN head | | |
+| W2 | WAM-style multi-task: per-pixel detection + bits (optionally from WAM weights) | | |
+| W3 | Message-conditioned segmenter (FiLM / cross-attention on bits, trained with wrong-message negatives) | | |
+| W4 | Reference two-stream + correlation volume (`x` high-pass vs `embed(x, m) − x`) | | |
+| W5 | Auxiliary residual regression `x − c` on synthetic data | | |
+| W6 | Two-stage: find the box, segment at native scale | | |
+| W7 | Dual-stream noise (SRM / Bayar, full resolution) + semantic (DINOv3 / SAM 2) | | |
+| W8 | SAM 2 refiner prompted with the coarse map | | |
+
+**Beyond training (PLAN.md §6)**
+
+| # | Idea | Owner | Status |
+|---|---|---|---|
+| T1 | Training-free maps: decoder agreement (PS, TM), blurred-patch occlusion (SS), matched filter, TrustMark-RM; whole-image decode for the kind | | |
+| T2 | Rectangle search (coarse 64 px grid, then 4 px refinement, then matched-filter refinement) maximizing the log-likelihood of the known bits | | |
+| T3 | Test-time optimization through the differentiable decoders (box / mask refinement) | | |
+| T4 | Pseudo-labels on test (Noisy Student), **only if the organizers allow it** | | |
+| T5 | Watermark-safe TTA: integer pixel shifts | | |
+| T6 | Post-processing on out-of-fold predictions: thresholds per method × kind, never-empty small part, rectangle snap, morphology, SAM 2 snap | | |
+| T7 | Ensembles and stacking (small CNN on probs + T1 maps, trained out-of-fold) | | |
+| T8 | Region-wise binomial p-values on known-bit agreement (calibrated maps); multi-scale sliding-window decoding + linear probe (SS) | | |
 
 ## Leaderboard submissions
 
@@ -125,7 +159,9 @@ decoding + linear probe (SS); region-wise binomial p-values on known-bit agreeme
 
 ## Decisions
 
-- 2026-11-21: Main track is a segmentation network trained on real + synthetic data. Decoder-based maps
-  become input channels.
+- 2026-11-21: No fixed roles. We split the base library build only; afterwards anyone runs any experiment.
+  ID blocks: E100–E199 and E200–E299.
+- 2026-11-21: Main track is segmentation networks on real + synthetic data, plus the training-free track.
+  Everything writes the same probability files, so anything can be evaluated and ensembled.
 - 2026-11-21: Fixed 5-fold split in `splits/folds.json` (seed 0, 17 images per method × kind per fold).
   Never regenerate it.

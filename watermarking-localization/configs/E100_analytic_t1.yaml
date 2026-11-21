@@ -1,0 +1,14 @@
+id: E100_analytic_t1
+parent: base
+data:
+  val: all510
+  cache_dir: output/cache/features
+model:
+  name: analytic
+  mode: t1
+  use_kit: true
+  use_matched: false
+post:
+  threshold: oof
+  never_empty: true
+  min_cells: 24

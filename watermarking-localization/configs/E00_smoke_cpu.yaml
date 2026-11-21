@@ -1,0 +1,24 @@
+id: E00_smoke_cpu
+parent: base
+data:
+  train: [real]
+  train_folds: [1, 2, 3, 4]
+  val: f0
+  cache_dir: null
+input:
+  channels: [rgb, srm]
+model:
+  name: tiny_unet
+  base_ch: 16
+  cond: message
+  heads: [mask, kind]
+train:
+  epochs: 1
+  batch: 4
+  val_batch: 4
+  max_batches: 2
+  workers: 0
+  amp: false
+  ema: true
+  device: cpu
+  skip_test: true

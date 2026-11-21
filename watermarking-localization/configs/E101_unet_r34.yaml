@@ -1,0 +1,19 @@
+id: E101_unet_r34
+parent: base
+data:
+  train: [real]
+  train_folds: [1, 2, 3, 4]
+  val: f0
+input:
+  channels: [rgb]
+model:
+  name: smp
+  arch: Unet
+  encoder: resnet34
+  encoder_weights: imagenet
+  cond: method
+  heads: [mask, kind]
+train:
+  epochs: 25
+  batch: 16
+  lr: 3.0e-4

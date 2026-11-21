@@ -1,0 +1,52 @@
+id: base
+parent: none
+data:
+  train: [real]
+  train_folds: [1, 2, 3, 4]
+  val: f0
+  synth_ratio: 0.8
+  cache_dir: output/cache/features
+input:
+  channels: [rgb]
+augment:
+  integer_shift: true
+  max_shift_cells: 8
+  copy_paste_prob: 0.0
+  post_flip: false
+  post_jitter: false
+  post_jpeg: false
+model:
+  name: tiny_unet
+  cond: none
+  heads: [mask, kind]
+loss:
+  bce: 0.5
+  dice: 0.5
+  dual_iou: 1.0
+  lovasz: 0.0
+  boundary: 0.0
+  aux_kind: 0.1
+  aux_bits: 0.0
+  aux_residual: 0.0
+train:
+  epochs: 20
+  batch: 16
+  val_batch: 16
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  amp: true
+  ema: true
+  ema_decay: 0.995
+  grad_clip: 1.0
+  wrong_msg_prob: 0.0
+  workers: 2
+  seed: 0
+post:
+  threshold: oof
+  never_empty: true
+  min_cells: 24
+  min_component_cells: 8
+  rect_snap: false
+  rect_snap_fill: 0.85
+  rect_snap_patch_only: true
+  tta_shifts: [[0, 0]]

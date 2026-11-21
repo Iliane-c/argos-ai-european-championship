@@ -27,3 +27,21 @@ The public evaluator is needed to measure the forget score, retain score, and th
 ### Public evaluation
 
 The organizer accepted `head_only.pt` as submission **1123** and returned a public-split score of **0.0**. The response included only the aggregate score, so the forget component, retain component, and validation gate outcome are unknown. The starter client timed out during the first attempt. Streaming the same file to the documented evaluator endpoint succeeded.
+
+## T3-002 — Last-block updates with synthetic retention probes
+
+Start with `model.pt`. The script builds an image-specific soft target from the original model's predictions on the clean image, a horizontal flip, and two shifted crops. Each round updates only the last ViT block, first fitting those targets on the original forget images and then matching the original predictions on synthetic inputs. Both the rest of the backbone and the classifier head stay frozen.
+
+The original model generates synthetic inputs from random starts by optimizing each one toward a requested class. The full run targets all 100 classes with four inputs per class for training and two independent inputs per class for validation. The log records how many requested classes the teacher actually predicted in each split.
+
+On a GPU node, run from the repository root with the starter files in `task3/`.
+
+```bash
+cd task3
+uv sync --locked
+PYTHONPATH=. uv run --no-sync python -u ../unlearning/unlearn.py
+```
+
+The default run uses one GPU and writes `output/t3-002/round_01.pt` through `round_03.pt`. Add `--smoke` for a four-image pipeline check, or use `--output output/t3-002-repeat` to run again in a fresh directory. Smoke checkpoints are for pipeline verification.
+
+`metrics.jsonl` includes the unchanged model at round 0 and the measurements after each forget and retention pass. Compare KL divergence to the soft targets on clean and blurred forget images, and compare KL divergence and top-class agreement with the original model on the held-out synthetic inputs. Blur is used only for evaluation. These are diagnostics for choosing a checkpoint. The evaluator supplies the score against the retrained reference and applies the held-out accuracy gate.

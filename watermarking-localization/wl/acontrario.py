@@ -41,7 +41,8 @@ RAW_DIR = ROOT_DIR / "output" / "cache" / "raw"
 AC_DIR = ROOT_DIR / "output" / "cache" / "acontrario"
 WINDOW_SIZES = {"pixelseal": (256, 128), "trustmark": (256, 128), "stegastamp": (256, 160)}
 WINDOW_STRIDE = 64
-OCC_PATCH = 64
+OCC_PATCH = 32  # occlusion probes at native scale (whole image decoded), all methods
+PP_SHIFTS = 4    # per-position maps at 4x4 sub-cell offsets -> 16 px resolution instead of 64 px
 
 
 # ----------------------------------------------------------------------------- 1. extraction (GPU)
@@ -88,11 +89,27 @@ def extract_raw(img_uint8: np.ndarray, method: str, wm_model: Any) -> dict[str, 
     out["win_boxes"] = np.asarray(boxes, dtype=np.int16)
 
     if method in ("pixelseal", "trustmark") and hasattr(wm_model, "features"):
+        # Shift-and-interleave: the extractor's per-position head has a stride of IMG_SIZE / Hf px.
+        # Decoding the whole image (native scale) at PP_SHIFTS x PP_SHIFTS sub-stride offsets and
+        # interleaving the results gives a map PP_SHIFTS times finer, still at the native scale.
         with torch.no_grad():
-            pp = wm_model.features(base[None])["per_position_logits"][0].float().cpu().numpy()
-        out["pp_logits"] = pp[:nbits].astype(np.float16)  # [nbits, Hf, Wf]
+            pp0 = wm_model.features(base[None])["per_position_logits"][0].float().cpu().numpy()[:nbits]
+            hf, wf = pp0.shape[-2:]
+            step_y, step_x = IMG_SIZE // hf, IMG_SIZE // wf
+            hr = np.zeros((nbits, hf * PP_SHIFTS, wf * PP_SHIFTS), dtype=np.float32)
+            for sy in range(PP_SHIFTS):
+                for sx in range(PP_SHIFTS):
+                    dy, dx = sy * step_y // PP_SHIFTS, sx * step_x // PP_SHIFTS
+                    shifted = torch.roll(base, shifts=(dy, dx), dims=(1, 2))
+                    pp = wm_model.features(shifted[None])["per_position_logits"][0].float().cpu().numpy()[:nbits]
+                    # cell (i, j) of the shifted image is centred on original pixel i*step + step/2 - dy
+                    rows = ((np.arange(hf) * step_y + step_y // 2 - dy) % IMG_SIZE) // (step_y // PP_SHIFTS)
+                    cols = ((np.arange(wf) * step_x + step_x // 2 - dx) % IMG_SIZE) // (step_x // PP_SHIFTS)
+                    hr[:, rows[:, None], cols[None, :]] = pp
+        out["pp_logits"] = pp0.astype(np.float16)  # [nbits, Hf, Wf]
+        out["pp_hr_logits"] = hr.astype(np.float16)  # [nbits, Hf*S, Wf*S]
 
-    if method == "stegastamp":
+    if OCC_PATCH:  # occlusion probes, every method
         blurred = np.asarray(
             Image.fromarray(img_uint8).resize((64, 64), Image.Resampling.BILINEAR).resize((IMG_SIZE, IMG_SIZE), Image.Resampling.BILINEAR),
             dtype=np.uint8,
@@ -188,8 +205,9 @@ def acontrario_maps(raw: dict[str, np.ndarray], bits: np.ndarray, n_keys: int, s
     z_parts.append(_zscore(win_maps[0], win_maps[1:]))
     score_parts.append(win_maps)
 
-    if "pp_logits" in raw:
-        pp = np.moveaxis(raw["pp_logits"].astype(np.float32), 0, -1)  # [Hf, Wf, nbits]
+    pp_key = "pp_hr_logits" if "pp_hr_logits" in raw else "pp_logits"
+    if pp_key in raw:
+        pp = np.moveaxis(raw[pp_key].astype(np.float32), 0, -1)  # [H, W, nbits]
         pp_maps = agree(pp)  # [Hf, Wf, K+1]
         pp_up = np.stack([_resize(pp_maps[:, :, k]).reshape(-1) for k in range(pp_maps.shape[-1])])
         z_parts.append(_zscore(pp_up[0], pp_up[1:]))

@@ -46,6 +46,7 @@ fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
+export PYTHONUNBUFFERED=1
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: sbatch jobs/run_node.sh <manifest.txt | cfg1.yaml [cfg2.yaml ...]>" >&2

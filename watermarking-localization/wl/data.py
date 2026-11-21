@@ -1,6 +1,7 @@
 """Real & synthetic shard datasets, channel assembly, and fold-aware dataloaders."""
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -272,12 +273,15 @@ class SynthShardDataset(Dataset):
         augment_fn: Callable[..., tuple[np.ndarray, np.ndarray]] | None = None,
         as_tensor: bool = True,
         seed: int = 0,
+        preload: bool = True,
+        max_cache_gb: float = 16.0,
     ):
         self.shard_dir = Path(shard_dir)
         self.channels = tuple(channels)
         self.augment_fn = augment_fn
         self.as_tensor = as_tensor
         self.rng = np.random.default_rng(seed)
+        self._max_cache_bytes = int(max(0.5, float(max_cache_gb)) * (1024 ** 3))
 
         shard_files = sorted(self.shard_dir.glob("*.npz"))
         if not shard_files:
@@ -285,23 +289,40 @@ class SynthShardDataset(Dataset):
 
         allowed = set(methods) if methods else None
         self.shard_paths: list[Path] = shard_files
-        self._shard_cache: dict[int, dict[str, np.ndarray]] = {}
+        self._shard_cache: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
+        self._cache_bytes: int = 0
         self.index: list[tuple[int, int]] = []
         for s_idx, sp in enumerate(self.shard_paths):
             with np.load(sp, allow_pickle=False) as z:
                 m_arr = z["method"].tolist()
-            for r_idx, m in enumerate(m_arr):
-                if allowed is None or str(m) in allowed:
+                matched_rows = [
+                    r_idx for r_idx, m in enumerate(m_arr) if allowed is None or str(m) in allowed
+                ]
+                for r_idx in matched_rows:
                     self.index.append((s_idx, r_idx))
+                if preload and matched_rows:
+                    # Preload shards in the parent process before DataLoader forks workers so
+                    # Linux COW shares the decompressed arrays and avoids per-sample zlib reads.
+                    shard_data = {k: z[k] for k in z.files}
+                    shard_nbytes = sum(arr.nbytes for arr in shard_data.values())
+                    if self._cache_bytes + shard_nbytes <= self._max_cache_bytes:
+                        self._shard_cache[s_idx] = shard_data
+                        self._cache_bytes += shard_nbytes
 
     def _get_shard(self, shard_idx: int) -> dict[str, np.ndarray]:
-        if shard_idx not in self._shard_cache:
-            # Keep memory bounded if there are dozens of large shards.
-            if len(self._shard_cache) >= 4:
-                self._shard_cache.clear()
-            with np.load(self.shard_paths[shard_idx], allow_pickle=False) as z:
-                self._shard_cache[shard_idx] = {k: z[k] for k in z.files}
-        return self._shard_cache[shard_idx]
+        cached = self._shard_cache.get(shard_idx)
+        if cached is not None:
+            self._shard_cache.move_to_end(shard_idx)
+            return cached
+        with np.load(self.shard_paths[shard_idx], allow_pickle=False) as z:
+            shard_data = {k: z[k] for k in z.files}
+        shard_nbytes = sum(arr.nbytes for arr in shard_data.values())
+        while self._shard_cache and self._cache_bytes + shard_nbytes > self._max_cache_bytes:
+            _, evicted = self._shard_cache.popitem(last=False)
+            self._cache_bytes -= sum(arr.nbytes for arr in evicted.values())
+        self._shard_cache[shard_idx] = shard_data
+        self._cache_bytes += shard_nbytes
+        return shard_data
 
     def __len__(self) -> int:
         return len(self.index)
@@ -424,7 +445,13 @@ def build_dataloaders(
     if len(parts) == 1:
         train_ds = parts[0]
         train_loader = DataLoader(
-            train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_mem, drop_last=False
+            train_ds,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_mem,
+            persistent_workers=num_workers > 0,
+            drop_last=False,
         )
     else:
         train_ds = ConcatDataset(parts)
@@ -441,7 +468,12 @@ def build_dataloaders(
         epoch_samples = int(data_cfg.get("epoch_samples", len(train_ds)))
         sampler = WeightedRandomSampler(weights, num_samples=epoch_samples, replacement=True)
         train_loader = DataLoader(
-            train_ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=pin_mem
+            train_ds,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=pin_mem,
+            persistent_workers=num_workers > 0,
         )
 
     val_spec = str(data_cfg.get("val", "f0"))

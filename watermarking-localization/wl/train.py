@@ -215,7 +215,7 @@ def run_training(
         )
         metrics = evaluate_predictions(val_names, val_probs, meta_by_name, masks_by_name, threshold=0.5)
         avg_loss = running_loss / max(1, n_steps)
-        print(f"[{exp_id}] epoch {epoch}/{epochs} loss={avg_loss:.4f} | {format_metrics_summary(metrics)}")
+        print(f"[{exp_id}] epoch {epoch}/{epochs} loss={avg_loss:.4f} | {format_metrics_summary(metrics)}", flush=True)
 
         if float(metrics["mean"]) > best_score:
             best_score = float(metrics["mean"])
@@ -245,7 +245,7 @@ def run_training(
         final_metrics["oof_post_cfg"] = oof_fit["post_cfg"]
         final_metrics["oof_mean"] = oof_fit["oof_score"]
         final_metrics["oof_metrics"] = oof_fit["metrics"]
-        print(f"[{exp_id}] OOF post-proc: {oof_fit['raw_score']:.4f} -> {oof_fit['oof_score']:.4f}")
+        print(f"[{exp_id}] OOF post-proc: {oof_fit['raw_score']:.4f} -> {oof_fit['oof_score']:.4f}", flush=True)
 
     write_metrics(out_dir, final_metrics)
 

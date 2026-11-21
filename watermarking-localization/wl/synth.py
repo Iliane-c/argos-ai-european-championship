@@ -332,6 +332,7 @@ def generate_shards(
     clean_dir: str | Path | None = None,
     methods: Sequence[str] = METHODS,
     mock_embed: bool = False,
+    shard_prefix: str = "shard",
 ) -> list[Path]:
     """Generate compressed .npz shards following the standard training shard schema."""
     out_path = Path(out_dir)
@@ -362,7 +363,7 @@ def generate_shards(
         nonlocal shard_idx
         if not buf:
             return
-        sp = out_path / f"shard_{shard_idx:04d}.npz"
+        sp = out_path / f"{shard_prefix}_{shard_idx:04d}.npz"
         np.savez_compressed(
             sp,
             image=np.stack([b["image"] for b in buf], axis=0).astype(np.uint8),
@@ -397,6 +398,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--clean-dir", default=None)
     ap.add_argument("--methods", nargs="+", default=list(METHODS))
+    ap.add_argument("--shard-prefix", default="shard", help="Filename prefix for shard files")
     ap.add_argument("--mock-embed", action="store_true", help="Use mock embedder for offline tests")
     args = ap.parse_args()
 
@@ -411,6 +413,7 @@ def main() -> None:
         clean_dir=args.clean_dir,
         methods=args.methods,
         mock_embed=args.mock_embed,
+        shard_prefix=args.shard_prefix,
     )
     print(f"Wrote {len(shards)} shards to {args.out}")
 

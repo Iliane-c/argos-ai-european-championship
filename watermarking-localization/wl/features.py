@@ -193,7 +193,7 @@ def compute_decoder_agreement(
 
     signed_msg = (2.0 * bits - 1.0).astype(np.float32)
     signed_t = torch.from_numpy(signed_msg).float()
-    img_t = torch.from_numpy(img_uint8).permute(2, 0, 1)[None].float().div(255.0)
+    img_t = torch.from_numpy(np.array(img_uint8, dtype=np.uint8, copy=True)).permute(2, 0, 1)[None].float().div(255.0)
 
     with torch.no_grad():
         full_logits = wm_model.logits(img_t)[0].detach().cpu()

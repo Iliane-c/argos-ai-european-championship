@@ -16,19 +16,32 @@ except ImportError:
     _pilgram = None
 
 
-_PILGRAM_FILTERS = (
+_PILGRAM_CANDIDATES = (
     "aden",
     "brooklyn",
     "clarendon",
     "gingham",
     "hudson",
-    "juno",
     "lark",
     "lofi",
+    "maven",
+    "mayfair",
     "moon",
+    "nashville",
+    "perpetua",
     "reyes",
+    "rise",
     "slumber",
+    "toaster",
     "valencia",
+    "walden",
+    "willow",
+    "xpro2",
+)
+_PILGRAM_FILTERS = (
+    tuple(f for f in _PILGRAM_CANDIDATES if hasattr(_pilgram, f))
+    if _pilgram is not None
+    else ()
 )
 
 
@@ -55,7 +68,7 @@ def augment_clean_before_embed(
         arr = np.ascontiguousarray(np.rot90(arr, k=k, axes=(0, 1)))
 
     pil = Image.fromarray(arr)
-    if use_pilgram and _pilgram is not None and rng.random() < 0.25:
+    if use_pilgram and _PILGRAM_FILTERS and rng.random() < 0.25:
         fname = str(rng.choice(_PILGRAM_FILTERS))
         pil = getattr(_pilgram, fname)(pil).convert("RGB")
     else:

@@ -74,3 +74,29 @@ uv run --no-sync python -u unlearn.py --neggrad
 Locally, use `PYTHONPATH=. uv run --no-sync python -u ../unlearning/unlearn.py --neggrad` from `task3/`. Add `--smoke` to check the pipeline. The full run writes three checkpoints and `metrics.jsonl` under `output/t3-003/`.
 
 The metrics include eligible image count, mean probability of the original top class on clean and blurred images, and agreement and KL drift on held-out synthetic probes. The view-averaged target KL is retained for comparison with T3-002. These diagnostics use pseudo-labels and synthetic inputs. The official evaluator measures gold-model agreement and held-out accuracy.
+
+## T3-010 — Delta-shift distillation with strength interpolation
+
+All previous submissions moved the forget-set CE from 0.0003 to at most 0.0006. The metric normalizes by the gap between the memorizing original and the never-seen gold models, so those edits scored about 1e-5. The server rounds responses to four decimals and displayed them as 0.0.
+
+`shift_distill.py` fine-tunes the full model. For every augmented view of a forget image, the target logits are the original model's logits minus δ on the clean top class. This removes a memorization bonus and sends the freed mass to the original runner-ups, which share a block of related class IDs 62% of the time. Retention is teacher KD at T=2 on COCO val2017, center-cropped to 224 px, with the last 500 images held out for a drift audit. `interpolate.py` turns one run into a strength family θ(γ) = θ₀ + γ(θᵤ − θ₀). An 80/20 split of the forget set showed that forgetting reaches held-out forget images almost as strongly as trained ones, so drift on same-class control images is the main cost.
+
+From `task3/`, with `coco224.npy` built from COCO val2017:
+
+```bash
+PYTHONPATH=. .venv/bin/python ../unlearning/shift_distill.py --out output/t3-010/d12.pt --retain coco224.npy --delta 12 --epochs 8
+PYTHONPATH=. .venv/bin/python ../unlearning/interpolate.py output/t3-010/d12.pt --gammas 1.5 --retain coco224.npy --export output/t3-010
+```
+
+The submitted runs used the scratchpad prototype of these scripts, with retention on 1,024 CIFAR-100 images (δ=10) or all 5,000 COCO images (δ=12). Clean forget statistics cover all 3,500 images.
+
+| Submission | Model | Forget clean CE mean/std, acc | Public score |
+| --- | --- | ---: | ---: |
+| 1612 | δ=10, CIFAR KD, 5 epochs, γ=1.0 | 0.27/0.49, 91% | 0.0236 |
+| 1640 | same, γ=1.25 | 0.61/0.72, 80% | 0.0380 |
+| 1676 | same, γ=1.5 | 1.07/0.89, 66% | 0.0440 |
+| 1708 | δ=12, COCO KD, 8 epochs, γ=1.25 | 1.06/0.99, 62% | 0.0622 |
+| **1731** | **same, γ=1.5** | **1.61/1.12, 44%** | **0.0692** |
+| 1757 | same, γ=1.75 | 2.10/1.16, 32% | 0.0642 |
+
+At matched clean CE, δ=12 with COCO KD beat δ=10 with CIFAR KD by about 40%, with a heavier loss tail and less KL from the original. The γ sweep peaks near 1.5.

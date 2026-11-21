@@ -1,0 +1,25 @@
+# Données, caches et poids : jamais dans git
+data/
+hf_cache/
+third_party/
+hackathon/
+output/
+outputs/
+**/output/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.npz
+*.zip
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# Secrets
+.env
+
+.DS_Store

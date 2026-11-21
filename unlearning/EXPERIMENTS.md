@@ -100,3 +100,17 @@ The submitted runs used the scratchpad prototype of these scripts, with retentio
 | 1757 | same, γ=1.75 | 2.10/1.16, 32% | 0.0642 |
 
 At matched clean CE, δ=12 with COCO KD beat δ=10 with CIFAR KD by about 40%, with a heavier loss tail and less KL from the original. The γ sweep peaks near 1.5.
+
+## T3-020 — Hybrid unlearning suite (code-ready, CPU-verified)
+
+Modular multi-paradigm unlearning library (`unlearning/ul/`), 7 CLI entrypoints (`unlearning/*.py`), and JURECA Slurm pipelines (`unlearning/jobs/*.sh`). Implemented locally and verified end-to-end on CPU against a synthetic `TinyViT` task mock; JURECA GPU execution and public scoring remain pending.
+
+- **Core package (`ul/`)**: [`model_io.py`](ul/model_io.py), [`metrics.py`](ul/metrics.py), [`augmentations.py`](ul/augmentations.py), [`saliency.py`](ul/saliency.py) (ViT layer groups, empirical/predictive diagonal Fisher, SalUn/SSD masks, SSD weight dampening, L1-sparse pruning, mergeable `LoRALinear`, `ActivationSubspaceProjector` OGP), [`losses.py`](ul/losses.py) (T=2/T=1 KD, `MemoryBankMomentLoss` mean/std & 1D Wasserstein, bounded NPO, local view smoothness, SCAR Mahalanobis feature push, feature anchor, Fisher EWC), [`oracle.py`](ul/oracle.py) (4-signal memorization scoring, stratified OOF Ridge+kNN oracle, hybrid target synthesis), [`merging.py`](ul/merging.py) (task arithmetic, TIES/Fisher merging, layerwise `γ`, multi-paradigm souping).
+- **JURECA execution order** (from `unlearning/`, pointing `POOL_PATH` to a domain-matched pool after Step 0 identifies the 100 classes):
+  1. `sbatch jobs/00_diagnose.sh` — forensic audit (`diagnose.py`)
+  2. `POOL_PATH=/path/to/pool sbatch jobs/01_build_retain_and_oracle.sh` — deduplicated class-balanced proxy + initial oracle (`build_retain_proxy.py`, `build_oracle.py`)
+  3. `sbatch jobs/02_train_shadow_gold.sh` — train 3 Shadow-Gold `ViT-B/16` models excluding forget images (`train_shadow_gold.py`), then re-run `build_oracle.py --shadow-gold ...`
+  4. `sbatch jobs/03_wave1_kfold_and_salun.sh` — 5-fold cross-fitted TIES task-vector unlearning (`kfold_unlearn.py`) + SalUn late-MLP baseline (`hybrid_unlearn.py`)
+  5. `sbatch jobs/04_wave2_hybrid_and_branches.sh` — full hybrid branch, LoRA+OGP branch, and L1-prune+heal branch (`hybrid_unlearn.py`)
+  6. `sbatch jobs/05_soup_and_eval.sh` — weight-space soup + coordinate layerwise `γ` search (`soup_and_eval.py`)
+

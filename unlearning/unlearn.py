@@ -164,14 +164,15 @@ def main():
         matched = probabilities.argmax(1) == labels
         metadata[f"{split}_probe_classes_matched"] = labels[matched].unique().numel()
         metadata[f"{split}_probe_class_agreement"] = matched.float().mean().item()
-    print(json.dumps(metadata), flush=True)
+    metadata_record = json.dumps(metadata, allow_nan=False)
+    print(metadata_record, flush=True)
 
     block = model.blocks[-1].requires_grad_(True)
     optimizer = torch.optim.AdamW(block.parameters(), lr=1e-5, weight_decay=0.0)
     scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
     with (output / "metrics.jsonl").open("w") as metrics:
-        print(json.dumps(metadata), file=metrics, flush=True)
+        print(metadata_record, file=metrics, flush=True)
         for round_number in range(rounds + 1):
             if round_number:
                 print(f"Round {round_number}/{rounds} on {DEVICE}", flush=True)
@@ -180,11 +181,12 @@ def main():
 
             result = evaluate(model, batches, clean_probs, targets, val_probes, val_targets, batch_size)
             result["round"] = round_number
-            if round_number:
-                path = output / f"round_{round_number:02}.pt"
-                save_checkpoint(model, path)
-                result["checkpoint"] = path.name
+            checkpoint = f"round_{round_number:02}.pt" if round_number else None
+            if checkpoint:
+                result["checkpoint"] = checkpoint
             record = json.dumps(result, allow_nan=False)
+            if checkpoint:
+                save_checkpoint(model, output / checkpoint)
             print(record, file=metrics, flush=True)
             print(record, flush=True)
 

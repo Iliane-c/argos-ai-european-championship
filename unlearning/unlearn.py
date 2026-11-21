@@ -1,4 +1,4 @@
-"""T3-002: fit augmentation targets and preserve predictions on synthetic inputs."""
+"""Run a Task 3 unlearning sweep with synthetic retention probes."""
 
 import argparse
 import json
@@ -19,6 +19,7 @@ from task_template import (
 
 
 TEMPERATURE = 2.0
+NEGGRAD_BATCHES = 8
 
 
 def logits(model, images):
@@ -28,6 +29,14 @@ def logits(model, images):
 
 def divergence(scores, targets):
     return F.kl_div((scores / TEMPERATURE).log_softmax(1), targets, reduction="batchmean")
+
+
+def distillation_loss(scores, targets):
+    return TEMPERATURE**2 * divergence(scores, targets)
+
+
+def negative_cross_entropy(scores, labels):
+    return -F.cross_entropy(scores / TEMPERATURE, labels)
 
 
 def resize(images, size):
@@ -44,7 +53,7 @@ def blurred(images):
 
 @torch.no_grad()
 def forget_references(model, batches):
-    clean_probs, targets = [], []
+    clean_probs, targets, agreed = [], [], []
     for batch in batches:
         images = preprocess(batch)
         views = (
@@ -53,10 +62,12 @@ def forget_references(model, batches):
             resize(images[..., 8:-8, :-16], IMAGE_SIZE),
             resize(images[..., 8:-8, 16:], IMAGE_SIZE),
         )
-        probabilities = [(logits(model, view) / TEMPERATURE).softmax(1) for view in views]
+        probabilities = torch.stack([(logits(model, view) / TEMPERATURE).softmax(1) for view in views])
         clean_probs.append(probabilities[0].cpu())
-        targets.append(torch.stack(probabilities).mean(0).cpu())
-    return torch.cat(clean_probs), torch.cat(targets)
+        targets.append(probabilities.mean(0).cpu())
+        top_classes = probabilities.argmax(dim=2)
+        agreed.append((top_classes == top_classes[0]).all(dim=0).cpu())
+    return torch.cat(clean_probs), torch.cat(targets), torch.cat(agreed)
 
 
 def make_probes(model, labels, batch_size, steps):
@@ -82,11 +93,11 @@ def make_probes(model, labels, batch_size, steps):
     return torch.cat(probes), torch.cat(targets)
 
 
-def fit_pass(model, images, targets, optimizer, scaler, batch_size, prepare):
+def fit_pass(model, images, targets, optimizer, scaler, batch_size, prepare, loss_fn=distillation_loss):
     for indices in torch.randperm(len(images)).split(batch_size):
         optimizer.zero_grad(set_to_none=True)
         scores = logits(model, prepare(images[indices]))
-        loss = TEMPERATURE**2 * divergence(scores, targets[indices].to(DEVICE))
+        loss = loss_fn(scores, targets[indices].to(DEVICE))
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -104,10 +115,12 @@ def evaluate(model, batches, clean_probs, targets, probes, probe_targets, batch_
     probe_scores = torch.cat([logits(model, probe_input(batch)).cpu() for batch in probes.split(batch_size)])
     clean_top = clean_probs.argmax(1, keepdim=True)
     top_probability = (clean_scores / TEMPERATURE).softmax(1).gather(1, clean_top)
+    blurred_top_probability = (blurred_scores / TEMPERATURE).softmax(1).gather(1, clean_top)
     return {
         "forget_target_kl": divergence(clean_scores, targets).clamp_min(0).item(),
         "blurred_forget_target_kl": divergence(blurred_scores, targets).clamp_min(0).item(),
         "forget_original_top_probability": top_probability.mean().item(),
+        "blurred_forget_original_top_probability": blurred_top_probability.mean().item(),
         "retain_probe_kl": divergence(probe_scores, probe_targets).clamp_min(0).item(),
         "retain_probe_agreement": (probe_scores.argmax(1) == probe_targets.argmax(1)).float().mean().item(),
     }
@@ -126,10 +139,12 @@ def save_checkpoint(model, path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--neggrad", action="store_true", help="Use short pseudo-label loss-ascent passes (T3-003)")
     parser.add_argument("--smoke", action="store_true", help="Run a short check with four forget images and two probe classes")
     parser.add_argument("--output", type=Path, help="New directory for metrics and checkpoints")
     args = parser.parse_args()
-    output = args.output or Path("output/t3-002-smoke" if args.smoke else "output/t3-002")
+    experiment = "t3-003" if args.neggrad else "t3-002"
+    output = args.output or Path("output") / (f"{experiment}-smoke" if args.smoke else experiment)
     output.mkdir(parents=True)
     torch.manual_seed(2026)
     batch_size = 4 if args.smoke else 16
@@ -144,7 +159,11 @@ def main():
     model = load_model().requires_grad_(False)
 
     print(f"Building forget targets on {DEVICE} for {len(images)} images", flush=True)
-    clean_probs, targets = forget_references(model, batches)
+    clean_probs, targets, agreed = forget_references(model, batches)
+    pseudo_labels = clean_probs.argmax(1)
+    eligible = agreed.nonzero(as_tuple=True)[0]
+    if args.neggrad and eligible.numel() == 0:
+        raise ValueError("No forget image has a consistent pseudo-label across all four views")
     classes = torch.arange(2 if args.smoke else NUM_CLASSES)
     train_labels = classes.repeat(1 if args.smoke else 4)
     val_labels = classes.repeat(1 if args.smoke else 2)
@@ -155,8 +174,10 @@ def main():
     probes, probe_targets = make_probes(model, train_labels, batch_size, probe_steps)
     val_probes, val_targets = make_probes(model, val_labels, batch_size, probe_steps)
     metadata = {
+        "experiment": experiment,
         "smoke": args.smoke,
         "forget_images": len(images),
+        "consistent_pseudo_labels": len(eligible),
         "probe_classes_targeted": len(classes),
         "target_original_top_probability": targets.gather(1, clean_probs.argmax(1, keepdim=True)).mean().item(),
     }
@@ -169,6 +190,9 @@ def main():
 
     block = model.blocks[-1].requires_grad_(True)
     optimizer = torch.optim.AdamW(block.parameters(), lr=1e-5, weight_decay=0.0)
+    if args.neggrad:
+        # Separate momentum prevents the retention pass from carrying the ascent direction forward.
+        ascent_optimizer = torch.optim.AdamW(block.parameters(), lr=1e-5, weight_decay=0.0)
     scaler = torch.amp.GradScaler("cuda", enabled=DEVICE == "cuda")
 
     with (output / "metrics.jsonl").open("w") as metrics:
@@ -176,7 +200,15 @@ def main():
         for round_number in range(rounds + 1):
             if round_number:
                 print(f"Round {round_number}/{rounds} on {DEVICE}", flush=True)
-                fit_pass(model, images, targets, optimizer, scaler, batch_size, preprocess)
+                if args.neggrad:
+                    selection = torch.randperm(len(eligible))[:NEGGRAD_BATCHES * batch_size]
+                    indices = eligible[selection]
+                    fit_pass(
+                        model, images[indices], pseudo_labels[indices], ascent_optimizer,
+                        scaler, batch_size, preprocess, loss_fn=negative_cross_entropy,
+                    )
+                else:
+                    fit_pass(model, images, targets, optimizer, scaler, batch_size, preprocess)
                 fit_pass(model, probes, probe_targets, optimizer, scaler, batch_size, probe_input)
 
             result = evaluate(model, batches, clean_probs, targets, val_probes, val_targets, batch_size)

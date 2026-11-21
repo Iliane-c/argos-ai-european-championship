@@ -60,3 +60,17 @@ The full run processed 3,500 forget images. The teacher predicted the requested 
 All rounds kept 100% top-class agreement on held-out synthetic probes. The forget targets assigned the original top classes 98.641% mean probability, up from 98.546% in the original model. The checkpoints moved closer to the targets on clean inputs, while the mean probability of the original top class rose in every round.
 
 `round_01.pt` is the first candidate for public evaluation. It has the lowest blurred target KL and the least synthetic probe drift among the three updated checkpoints. Its blurred target KL improved by only 0.10% relative to round 0. The public score and held-out accuracy remain pending.
+
+## T3-003 — Negative-gradient unlearning with synthetic retention
+
+Start again from `model.pt`. The original model supplies a pseudo-label only when its top class agrees across the clean image, flip, and both crops. Each round samples up to 128 eligible images and takes up to eight steps that increase cross-entropy on their pseudo-labels at temperature 2. Only the last ViT block is updated at a learning rate of `1e-5`. Each ascent pass is followed by the same synthetic retention pass as T3-002, with separate optimizer state for the two objectives.
+
+In the Jülich `unlearning/` workspace, copy the updated `unlearn.py` alongside `task_template.py` and run on a GPU node.
+
+```bash
+uv run --no-sync python -u unlearn.py --neggrad
+```
+
+Locally, use `PYTHONPATH=. uv run --no-sync python -u ../unlearning/unlearn.py --neggrad` from `task3/`. Add `--smoke` to check the pipeline. The full run writes three checkpoints and `metrics.jsonl` under `output/t3-003/`.
+
+The metrics include eligible image count, mean probability of the original top class on clean and blurred images, and agreement and KL drift on held-out synthetic probes. The view-averaged target KL is retained for comparison with T3-002. These diagnostics use pseudo-labels and synthetic inputs. The official evaluator measures gold-model agreement and held-out accuracy.

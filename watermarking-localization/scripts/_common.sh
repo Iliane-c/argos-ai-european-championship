@@ -1,7 +1,8 @@
 #!/bin/bash
 # Shared paths, venv activation, and Slurm defaults for all scripts/.
 
-set -euo pipefail
+# Strict mode only for scripts: in an interactive shell it would close the terminal on any failing command.
+[[ $- == *i* ]] || set -euo pipefail
 
 COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$COMMON_DIR/.." && pwd)"

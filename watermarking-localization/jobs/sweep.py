@@ -23,6 +23,29 @@ def _slug(val_str: str) -> str:
     )
 
 
+def _split_top_level(raw: str) -> list[str]:
+    """Split comma-separated values while keeping bracketed lists like [a,b] intact."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in raw:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}" and depth > 0:
+            depth -= 1
+        if ch == "," and depth == 0:
+            item = "".join(buf).strip()
+            if item:
+                parts.append(item)
+            buf = []
+        else:
+            buf.append(ch)
+    item = "".join(buf).strip()
+    if item:
+        parts.append(item)
+    return parts
+
+
 def build_sweep(
     base_config: str | Path,
     grid_args: list[str],
@@ -37,7 +60,7 @@ def build_sweep(
         if "=" not in arg:
             raise ValueError(f"Expected key=v1,v2,... got {arg!r}")
         key, vals_raw = arg.split("=", 1)
-        vals = [v.strip() for v in vals_raw.split(",") if v.strip()]
+        vals = _split_top_level(vals_raw)
         axes.append((key.strip(), vals))
 
     base_path = Path(base_config)

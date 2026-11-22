@@ -1,0 +1,7 @@
+id: E202_w8ns_synth60
+parent: E161_w8_noshift
+# Best recipe with more real images per batch (synth ratio 0.6 instead of 0.8): data-mix diversity.
+data:
+  synth_ratio: 0.6
+train:
+  seed: 5

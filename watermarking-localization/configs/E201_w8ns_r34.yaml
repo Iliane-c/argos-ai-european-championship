@@ -1,0 +1,5 @@
+id: E201_w8ns_r34
+parent: E161_w8_noshift
+# Best recipe with a ResNet-34 encoder: architectural diversity for the ensemble (cheaper, different errors).
+model:
+  encoder: resnet34

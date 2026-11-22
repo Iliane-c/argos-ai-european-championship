@@ -1,0 +1,6 @@
+id: E200_w2_r50_seed1
+parent: E143_w2_r50
+# Second seed of the non-W8 family (E143): E143_tta is the 2nd member of the best ensemble, a twin adds
+# diversity of the kind that helped (W2 vs W8 errors differ).
+train:
+  seed: 1

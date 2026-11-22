@@ -144,3 +144,46 @@ Bring back the logs first. Then fetch only the checkpoint whose clean CE at γ=1
 rsync -avP "$REMOTE/out/*.log" "$REMOTE/t3011.log" task3/output/t3-011/
 rsync -avP "$REMOTE/out/export/gen_mp20_g1.5.pt" task3/output/t3-011/
 ```
+
+### T3-011 results
+
+The run trained margin power −2.0 and −3.0 with about 5,400 generated images of the 45 forget classes mixed into the COCO retention pool. On those generated images, which are the closest stand-in for the control set, the in-domain anchors cut drift sharply at the same forget strength:
+
+| Checkpoint | Forget clean CE mean/std | Generated KL at T=1 | Agreement with original | Accuracy on generated |
+| --- | ---: | ---: | ---: | ---: |
+| Best COCO run (`mp20_g1.5`) | 1.60/1.55 | 0.538 | 0.786 | 0.582 |
+| `gen_mp20_g1.5` | 1.64/1.57 | 0.152 | 0.905 | 0.664 |
+| `gen_mp30_g1.5` | 1.64/1.65 | 0.150 | 0.904 | 0.666 |
+
+The original model scores 0.663 accuracy on the generated images, so the anchored models keep it. None of the 5,400 images came out black.
+
+| Submission | Checkpoint | Public score |
+| --- | --- | ---: |
+| **2461** | **`gen_mp30` at γ=1.5** | **0.1097** |
+| 2497 | `gen_mp30` at effective γ=1.8 | 0.1052 |
+
+Lower drift did not move the γ optimum up.
+
+## T3-012 — Sharpened bimodal targets
+
+On unseen in-domain images (the generated set), the original model is bimodal: it is right with near-zero loss on about two-thirds of the images and confidently wrong on the rest. Our unlearned models were a soft, medium-loss blob instead. The metric's mean/std term compares the loss std, so this gap matters.
+
+| Model and images | Accuracy | CE mean/std | CE quantiles 10/25/50/75/90/95 % | Max prob | True-class prob when wrong |
+| --- | ---: | ---: | --- | ---: | ---: |
+| Original on generated (gold-like) | 0.663 | 2.64/4.72 | 0.00/0.00/0.00/3.55/10.05/13.46 | 0.92 | 0.046 |
+| `gen_mp30_g1.5` on forget | 0.504 | 1.64/1.65 | 0.03/0.19/1.12/2.68/4.00/4.74 | 0.66 | 0.101 |
+| `ts15_g1.4` on forget | 0.547 | 1.63/2.01 | 0.00/0.04/0.68/2.76/4.56/5.73 | 0.78 | 0.095 |
+| `ts25_g1.35` on forget | 0.566 | 1.63/2.17 | 0.00/0.02/0.46/2.78/4.90/6.17 | 0.82 | 0.095 |
+
+`--target-scale s` multiplies the shifted target logits by s, so each forget image becomes confidently right or confidently wrong. Every run below uses margin power −3.0, δ=12 and the generated-plus-COCO retention pool, and was trained locally.
+
+| Submission | Change | Clean CE mean/std at submitted γ | Public score |
+| --- | --- | ---: | ---: |
+| 2558 | Target scale 1.5, γ=1.4 | 1.63/2.01 | 0.1563 |
+| 2597 | Target scale 2.5, γ=1.35 | 1.63/2.17 | 0.1711 |
+| 2634 | Target scale 2.5, γ=1.25 | 1.40/2.00 (est.) | 0.1517 |
+| **2671** | **Target scale 2.5, γ=1.5** | **1.95/2.38** | **0.1930** |
+| — | Target scale 2.5, γ=1.7 | 2.34/2.57 | pending |
+| — | Target scale 2.5, δ=20 | 1.56/1.78 at γ=1.2 | not submitted |
+
+Sharpening is the largest single gain since the first non-zero score. With sharper targets the strength optimum moved up: mean CE about 1.95 beats 1.6, unlike the soft-target runs. δ=20 was rejected locally because at a matched mean it lowers the loss std (1.78 versus 2.17) and raises retain drift, so it flips more images instead of making the flipped ones deeper. The best checkpoint is `task3/output/t3-012/ts25_g1.5.pt`. The remaining gap to the unseen-image shape is the depth of the wrong images: their true-class probability is 0.095 versus 0.046, and the loss tail reaches about 6 instead of 13. Scale 4 is training locally. `ssh_t3012.sh` sweeps δ=8, margin power −5, and 12 epochs at scales 2.5 and 4 on the server, with γ 1.4–2.0.

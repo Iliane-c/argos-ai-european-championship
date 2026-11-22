@@ -21,6 +21,9 @@ Options for the follow-up experiments:
   --clean-targets   build every view's forget target from the teacher's clean-image logits, so the student is
                     view-invariant like a model that never saw the image (needs no --repair)
   --strong-aug      add rotation up to 20 deg, down/up resampling, stronger blur and brightness to the views
+  --ref-rivals FILE logits [N, 100] of a reference model on stand-ins of the forget images (e.g. the original
+                    model on unseen img2img siblings); --ref-w of each target's wrong-class mass follows its
+                    rival distribution, while the true-class probability, and so the loss shape, is unchanged
   --split           train on 80% of the forget set, report the held-out 20% (leakage check)
 """
 import argparse
@@ -59,6 +62,8 @@ p.add_argument("--crop-weight", type=float, default=0.0, help="During repair, an
 p.add_argument("--repair", type=Path)
 p.add_argument("--clean-targets", action="store_true")
 p.add_argument("--strong-aug", action="store_true")
+p.add_argument("--ref-rivals", type=Path)
+p.add_argument("--ref-w", type=float, default=0.5)
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
 p.add_argument("--seed", type=int, default=0)
@@ -152,6 +157,8 @@ if args.crop_weight:
     parent_clean_ce = F.cross_entropy(logits(fteacher, imgs), y_all, reduction="none").to(dev)
 y_all, m_clean, delta_i, prior = y_all.to(dev), m_clean.to(dev), delta_i.to(dev), prior.to(dev)
 depth_ce = depth_ce.to(dev)
+ref = torch.from_numpy(np.load(args.ref_rivals)).float().to(dev) if args.ref_rivals else None
+assert ref is None or ref.shape == (len(imgs), 100), "reference logits must be [N_forget, 100] in forget order"
 
 # repair: retain anchors drawn in proportion to drift + its mean (the mean keeps a uniform replay share)
 r_prob = torch.ones(len(r_fit))
@@ -222,6 +229,14 @@ def forget_targets(zt, idx):
         q = F.softmax(t / T, 1)
         if args.soften > 0:
             q = (1 - args.soften) * q + args.soften * prior[y]
+        if ref is not None:  # keep p_true, move ref_w of the wrong-class mass to the reference's rivals
+            qt = q.gather(1, y[:, None])
+            own = q.scatter(1, y[:, None], 0.0)
+            alt = F.softmax(ref[idx] / T, 1).scatter(1, y[:, None], 0.0)
+            mix = (1 - args.ref_w) * own / own.sum(1, keepdim=True).clamp_min(1e-12) \
+                + args.ref_w * alt / alt.sum(1, keepdim=True).clamp_min(1e-12)
+            q = (mix * (1 - qt)).scatter(1, y[:, None], qt)
+            assert torch.allclose(q.sum(1), torch.ones_like(qt[:, 0]), atol=1e-4)
         out.append(q)
     return out
 

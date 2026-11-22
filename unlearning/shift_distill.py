@@ -12,6 +12,8 @@ Options for the follow-up experiments:
   --margin-power p  delta_i = delta * (margin_i / median margin) ** p
   --soften eps      mix eps of a per-class confusion prior into the targets (gold is an ensemble)
   --train-blocks k  train only the last k ViT blocks + final norm + head
+  --target-scale s  multiply the shifted target logits by s (>1: confidently right or confidently wrong,
+                    like a model on images it never saw)
   --split           train on 80% of the forget set, report the held-out 20% (leakage check)
 """
 import argparse
@@ -40,6 +42,7 @@ p.add_argument("--view-ratio", action="store_true")
 p.add_argument("--margin-power", type=float, default=0.0)
 p.add_argument("--soften", type=float, default=0.0)
 p.add_argument("--train-blocks", type=int, default=12)
+p.add_argument("--target-scale", type=float, default=1.0)
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
 p.add_argument("--seed", type=int, default=0)
@@ -134,7 +137,7 @@ def forget_targets(zt, idx):
     d = delta_i[idx]
     if args.view_ratio:
         d = d * (true_margin(zt, y) / m_clean[idx]).clamp(0, 1)
-    t = zt.scatter_add(1, y[:, None], -d[:, None])
+    t = zt.scatter_add(1, y[:, None], -d[:, None]) * args.target_scale
     out = []
     for T in (1.0, 2.0):
         q = F.softmax(t / T, 1)

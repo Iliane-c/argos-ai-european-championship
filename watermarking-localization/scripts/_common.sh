@@ -77,3 +77,28 @@ sbatch_node() {
         --error="$ROOT_DIR/output/${job_name}-%j.err" \
         "$ROOT_DIR/jobs/run_node.sh" "$@"
 }
+
+# Same as sbatch_node, but outside the cispahack reservation: the job goes to the general JURECA
+# queue (may wait longer) and does not count towards the team's one-node limit on the reservation.
+sbatch_node_public() {
+    local job_name="$1"
+    local walltime="$2"
+    shift 2
+    require_cmd sbatch
+    mkdir -p "$ROOT_DIR/output/logs"
+    local script="$ROOT_DIR/jobs/.run_node_public.sh"
+    grep -v -- "--reservation" "$ROOT_DIR/jobs/run_node.sh" > "$script"
+    chmod +x "$script"
+    (cd "$ROOT_DIR" && sbatch \
+        --job-name="$job_name" \
+        --account="$SLURM_ACCOUNT" \
+        --partition="$SLURM_PARTITION" \
+        --nodes=1 \
+        --ntasks-per-node=1 \
+        --gres="gpu:${SLURM_NODE_GPUS}" \
+        --cpus-per-task="$SLURM_NODE_CPUS" \
+        --time="$walltime" \
+        --output="$ROOT_DIR/output/${job_name}-%j.out" \
+        --error="$ROOT_DIR/output/${job_name}-%j.err" \
+        "$script" "$@")
+}

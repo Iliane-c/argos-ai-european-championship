@@ -9,3 +9,4 @@ output/
 *.pt
 *.pth
 *.onnx
+jobs/.run_node_public.sh

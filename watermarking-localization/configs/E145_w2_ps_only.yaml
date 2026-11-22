@@ -1,0 +1,6 @@
+id: E145_w2_ps_only
+parent: E103_w2_wam_multitask
+# One change vs. E103: train and validate on PixelSeal images only (real + synthetic).
+# E103 is weakest on PixelSeal (0.47 on fold 0 vs 0.62 TM, 0.78 SS); a specialist gets all the capacity.
+data:
+  methods: [pixelseal]

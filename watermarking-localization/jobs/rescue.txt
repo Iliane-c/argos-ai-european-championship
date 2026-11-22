@@ -1,0 +1,6 @@
+# Rescue after the 07:05 account cut: inference only (TTA from saved best.pt), then greedy + gated verify.
+#   source scripts/_common.sh && POST_CMD="bash jobs/rescue_post.sh" sbatch_node_public rescue 01:00:00 jobs/rescue.txt
+CMD: python -m wl.infer --run output/E192_w8ns_35ep --id E192_w8ns_35ep_tta && python -m wl.infer --run output/E190_w8ns_seed1 --id E190_w8ns_seed1_tta
+CMD: python -m wl.infer --run output/E191_w8ns_lovasz --id E191_w8ns_lovasz_tta && python -m wl.infer --run output/E193_w8ns_seed4 --id E193_w8ns_seed4_tta
+CMD: python -m wl.infer --run output/E164_w8_tmrm --id E164_tta && python -m wl.infer --run output/E200_w2_r50_seed1 --id E200_w2_r50_seed1_tta
+CMD: python -m wl.infer --run output/E201_w8ns_r34 --id E201_w8ns_r34_tta && python -m wl.infer --run output/E202_w8ns_synth60 --id E202_w8ns_synth60_tta

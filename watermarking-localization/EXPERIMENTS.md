@@ -91,6 +91,8 @@ are evaluated on a 128×128 grid.
 | E170 | 11-22 | 1 | E104 | synth-v2 (COCO bases, restore/paste/inpaint holes), no wrong-message negatives, no cached maps, SegFormer-B5 | Data diversity + capacity lift PixelSeal and `full` holes | real+synth-v2 | f0 | | | | | | | | planned |
 | E140_w3_noneg, E141_w3_rgbsrm, E142_w3_b5, E143_w2_40ep | 11-22 | 1 | E104/E103 | Ablations on synth-v1: no negatives; + drop agreement; + SegFormer-B5; W2 40 epochs. Numbers clash with E141_w2_msgmaps / E142_w2_long / E143_w2_r50 below; output dirs differ | The agreement channel is constant on synth and misaligned on real; negatives add label noise | real+synth-v1 | f0 | | | | | | | | running |
 | E190–E193 (wave 2) | 11-22 | 2 | E161 | Best recipe again: seed 1 (E190), + Lovász-hinge loss 0.5 (E191, Berman et al. CVPR 2018: surrogate of the Jaccard index the task is scored on), 35 epochs (E192), seed 4 (E193); TTA chained | More diverse members of the best recipe for the final ensemble | real+synth-v1 | f0 | | | | | | | | queued (job 15905158) |
+| E198g_final_gate | 11-22 | 2 | E198 | Size gate on verified boxes (Rahul, E182): reject refined boxes larger than the 0.9 quantile of training patch areas, CPU re-gate | z only proves the message is inside the box; oversized boxes are containing boxes | none | f0 | 0.545 | 0.654 | 0.846 | 0.631 | 0.732 | 0.6816 | **0.6863** | Best. f0: 2 images changed (2/0, CI [0, +0.021]); public +0.005 is the independent confirmation; 20 test boxes reverted |
+| E203_ens_142tta | 11-22 | 2 | E197 | E142 replaced by E142_tta (0.633 vs 0.623 alone) | Stronger member | none | f0 | | | | | | 0.6682 | | No gain (+0.0002) |
 | E198_final_verify | 11-22 | 2 | E197 | verify (PS, TM) on E197 = E157g weights/validation with all-folds twins at test time (E169_tta, E167_tta, E165_tta, E142) via `ensemble --test-runs` | +25 % data at test without biasing the validation | none | f0 | 0.543 | 0.634 | 0.846 | 0.631 | 0.717 | 0.674 | **0.6813** | **Current best.** Test masks agree 98.5 % with E158 (sanity check of the swap) |
 | E158_verify_e157g | 11-22 | 2 | E157g | `wl.verify` (PS, TM) on the TTA ensemble | Verify gain stacks | none | f0 | 0.543 | 0.634 | 0.846 | 0.631 | 0.717 | 0.674 | 0.6786 | +0.006 f0, +0.013 public vs E155g |
 | E196g_ens_plus166 | 11-22 | 2 | E157g | E157g + E166_tta (W8 seed 1) | More members | none | f0 | | | | | | 0.6678 | | Rejected (no gain, too close to E160) |
@@ -262,7 +264,8 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 | 11-22 | 2 | E155g_ens_w8_global | 0.660 | 0.6656 | best until 05:41 |
 | 11-22 | 2 | E157g_ens_tta | 0.668 | — | refused (HTTP 429 rate limit) |
 | 11-22 | 2 | E158_verify_e157g | 0.674 | 0.6786 | best until 06:07 |
-| 11-22 | 2 | E198_final_verify | 0.674 (all-folds test members) | 0.6813 | **current best**; copy in chander2/argos/submissions |
+| 11-22 | 2 | E198_final_verify | 0.674 (all-folds test members) | 0.6813 | best until 06:32 |
+| 11-22 | 2 | E198g_final_gate | 0.6816 (E198 + Rahul's size gate `--max-area-q 0.9`, `--regate`) | **0.6863** | **current best** (+0.005 public: confirms the gate, which on f0 rested on 2 images only); copy in submissions |
 
 ## Decisions
 

@@ -529,6 +529,20 @@ def _kit_models(device: torch.device, methods: Sequence[str]) -> dict[str, Any]:
     return _KIT_CACHE[key]
 
 
+_RM_CACHE: dict[str, Any] = {}
+
+
+def _tm_remover(device: torch.device) -> Any:
+    """TrustMark-RM removal network (pip `trustmark`, model Q), frozen, cached per device."""
+    key = str(device)
+    if key not in _RM_CACHE:
+        from trustmark import TrustMark
+
+        tm = TrustMark(verbose=False, model_type="Q", device=key)
+        _RM_CACHE[key] = tm.removal.eval()
+    return _RM_CACHE[key]
+
+
 class W8DecoderInLoopNet(W2WAMMultiTaskNet):
     """W8: W2 + the official extractors run inside the forward pass (frozen).
 
@@ -541,14 +555,16 @@ class W8DecoderInLoopNet(W2WAMMultiTaskNet):
     """
 
     def __init__(self, *args: Any, kit_methods: Sequence[str] = ("pixelseal", "trustmark"), pp_shifts: int = 2,
-                 ev_dim: int = 16, **kwargs: Any):
+                 ev_dim: int = 16, tm_rm: bool = False, **kwargs: Any):
         super().__init__(*args, **kwargs)
         feat_dim = self.det_conv.in_channels
+        self.tm_rm = bool(tm_rm)
+        self.n_rm = 2 if self.tm_rm else 0
         self.kit_methods = tuple(kit_methods)
         self.pp_shifts = int(pp_shifts)
         self.ev_proj = nn.Conv2d(MAX_BITS, ev_dim, kernel_size=1)
         self.fuse = nn.Sequential(
-            nn.Conv2d(feat_dim + ev_dim + 2, feat_dim, kernel_size=3, padding=1),
+            nn.Conv2d(feat_dim + ev_dim + 2 + self.n_rm, feat_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(feat_dim),
             nn.ReLU(inplace=True),
         )
@@ -587,12 +603,28 @@ class W8DecoderInLoopNet(W2WAMMultiTaskNet):
                 hr[:, :, rows[:, None], cols[None, :]] = pp
         return hr
 
+    @torch.no_grad()
+    def _rm_residual(self, x: torch.Tensor) -> torch.Tensor:
+        """|x - RM(x)| energy at two scales (256 = the remover's native size for whole-image marks,
+        512 = closer to native scale for small patches), each normalised by its image mean."""
+        rm = _tm_remover(x.device)
+        maps = []
+        for res in (256, 512):
+            xi = F.interpolate(x, size=(res, res), mode="bilinear", align_corners=False) * 2.0 - 1.0
+            try:
+                r = (rm(xi).clamp(-1, 1) - xi).abs().mean(dim=1, keepdim=True)
+            except Exception:  # remover not fully convolutional at this size
+                r = torch.zeros_like(xi[:, :1])
+            r = F.avg_pool2d(F.interpolate(r, size=(2 * GRID, 2 * GRID), mode="bilinear", align_corners=False), 2)
+            maps.append(torch.log1p(r / r.mean(dim=(-2, -1), keepdim=True).clamp(min=1e-6)))
+        return torch.cat(maps, dim=1)
+
     def _evidence(self, batch: dict[str, torch.Tensor], like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         from wl import METHOD_TO_ID, NBITS
 
         rgb = batch["rgb"]
         bsz = rgb.shape[0]
-        ev = like.new_zeros((bsz, self.ev_proj.out_channels + 2, GRID, GRID))
+        ev = like.new_zeros((bsz, self.ev_proj.out_channels + 2 + self.n_rm, GRID, GRID))
         mid = batch["method_id"]
         kit = _kit_models(rgb.device, self.kit_methods)
         for m in self.kit_methods:
@@ -609,7 +641,10 @@ class W8DecoderInLoopNet(W2WAMMultiTaskNet):
             pad = prod.new_zeros((prod.shape[0], MAX_BITS) + prod.shape[-2:])
             pad[:, :nb] = prod
             parts = torch.cat([agree * 4.0, strength, self.ev_proj(pad)], dim=1)
-            ev[idx] = F.interpolate(parts, size=(GRID, GRID), mode="bilinear", align_corners=False).to(ev.dtype)
+            ev[idx, : parts.shape[1]] = F.interpolate(parts, size=(GRID, GRID), mode="bilinear", align_corners=False).to(ev.dtype)
+            if self.tm_rm and m == "trustmark":
+                with torch.autocast(device_type=rgb.device.type, enabled=False):
+                    ev[idx, -self.n_rm :] = self._rm_residual(rgb[idx].float()).to(ev.dtype)
         return ev, ev[:, 0] / 4.0
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -696,6 +731,7 @@ def build_model(cfg: dict[str, Any]) -> nn.Module:
             kit_methods=tuple(mcfg.get("kit_methods", ["pixelseal", "trustmark"])),
             pp_shifts=int(mcfg.get("pp_shifts", 2)),
             ev_dim=int(mcfg.get("ev_dim", 16)),
+            tm_rm=bool(mcfg.get("tm_rm", False)),
         )
     if name == "w3_msg_cond":
         return W3MessageConditionedNet(

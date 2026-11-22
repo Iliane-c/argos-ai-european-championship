@@ -1,0 +1,7 @@
+id: E164_w8_tmrm
+parent: E160_w8_decoder_loop
+# One change vs. E160: add the TrustMark-RM removal residual |x - RM(x)| (2 scales) as evidence
+# channels for TrustMark images. The remover erases exactly the TrustMark pattern, so the residual
+# is high where the mark is and ~0 in `full`-image holes. Training-free cue, computed in the forward pass.
+model:
+  tm_rm: true

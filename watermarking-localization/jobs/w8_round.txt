@@ -3,4 +3,4 @@
 configs/E160_w8_decoder_loop.yaml
 configs/E161_w8_noshift.yaml
 configs/E162_w8_ps_tm.yaml
-configs/E163_w8_seed1.yaml
+configs/E164_w8_tmrm.yaml

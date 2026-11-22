@@ -2,4 +2,4 @@
 #   Check first: squeue -u chikhaoui1,chander2,chen67 is empty (one job per team).
 #   export HF_HUB_OFFLINE=1; source scripts/_common.sh && sbatch_node_public synthv3 04:00:00 jobs/synthv3.txt
 #   Set RANGE below from `python -c "from wl.synth import trace_report; trace_report()"` (training images only).
-CMD: RANGE="0.5 0.75"; python -m wl.synth --out data/synth/v3 --num-per-method 267 --shard-size 100 --device cuda --resample-prob 1.0 --resample-range $RANGE && python -m wl.train --config configs/E230_w8ns_synthv3.yaml && python -m wl.infer --run output/E230_w8ns_synthv3 --id E230_tta
+CMD: RANGE="0.5 0.75"; python -m wl.synth --out data/synth/v3 --num-per-method 1600 --shard-size 100 --device cuda --resample-prob 1.0 --resample-range $RANGE && python -m wl.train --config configs/E230_w8ns_synthv3.yaml && python -m wl.infer --run output/E230_w8ns_synthv3 --id E230_tta

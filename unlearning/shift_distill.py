@@ -14,6 +14,8 @@ Options for the follow-up experiments:
   --train-blocks k  train only the last k ViT blocks + final norm + head
   --target-scale s  multiply the shifted target logits by s (>1: confidently right or confidently wrong,
                     like a model on images it never saw)
+  --depth-weight w  Huber loss pulling the per-image CE of the hardest --depth-frac (lowest clean margin)
+                    towards --depth-lo..--depth-hi by hardness; KL alone stalls once target p_true is ~0
   --split           train on 80% of the forget set, report the held-out 20% (leakage check)
 """
 import argparse
@@ -43,6 +45,10 @@ p.add_argument("--margin-power", type=float, default=0.0)
 p.add_argument("--soften", type=float, default=0.0)
 p.add_argument("--train-blocks", type=int, default=12)
 p.add_argument("--target-scale", type=float, default=1.0)
+p.add_argument("--depth-weight", type=float, default=0.0)
+p.add_argument("--depth-frac", type=float, default=0.1)
+p.add_argument("--depth-lo", type=float, default=6.0)
+p.add_argument("--depth-hi", type=float, default=10.0)
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
 p.add_argument("--seed", type=int, default=0)
@@ -97,7 +103,15 @@ delta_i = args.delta * (m_clean / m_clean.median()) ** args.margin_power
 alt = F.softmax(z0.scatter(1, y_all[:, None], -1e9), 1)
 prior = torch.zeros(100, 100).index_add_(0, y_all, alt)
 prior = prior / prior.sum(1, keepdim=True).clamp_min(1e-12)
+# depth targets: hardest images (lowest clean margin) get CE lo..hi, linear in hardness rank; others NaN
+rank = m_clean.argsort().argsort().float() / (len(m_clean) - 1)  # 0 = hardest
+n_deep = int(args.depth_frac * len(m_clean))
+depth_ce = torch.where(rank * len(m_clean) < n_deep,
+                       args.depth_hi - (args.depth_hi - args.depth_lo) * rank * len(m_clean) / max(n_deep - 1, 1),
+                       torch.tensor(float("nan")))
+assert (~depth_ce.isnan()).sum() == n_deep
 y_all, m_clean, delta_i, prior = y_all.to(dev), m_clean.to(dev), delta_i.to(dev), prior.to(dev)
+depth_ce = depth_ce.to(dev)
 
 perm = torch.randperm(len(imgs), generator=torch.Generator().manual_seed(0))
 tr, ho = (perm[:2800], perm[2800:]) if args.split else (perm, perm[2800:])
@@ -166,6 +180,11 @@ for step in range(steps):
     with torch.autocast("cuda", dtype=amp_dtype or torch.float32, enabled=amp_dtype is not None):
         zs, rs = student(torch.cat([v, r])).float().split(args.bs)
     loss = kd(q1, zs, 1.0) + kd(q2, zs, 2.0) + args.retain_weight * kd(F.softmax(rt / 2, 1), rs, 2.0)
+    if args.depth_weight > 0:
+        tgt = depth_ce[idx]; deep = ~tgt.isnan()
+        if deep.any():
+            ce = F.cross_entropy(zs[deep], y_all[idx][deep], reduction="none")
+            loss = loss + args.depth_weight * F.smooth_l1_loss(ce, tgt[deep], reduction="sum") / args.bs
     opt.zero_grad(set_to_none=True)
     scaler.scale(loss).backward()
     scaler.unscale_(opt)

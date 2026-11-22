@@ -24,6 +24,9 @@ Options for the follow-up experiments:
   --ref-rivals FILE logits [N, 100] of a reference model on stand-ins of the forget images (e.g. the original
                     model on unseen img2img siblings); --ref-w of each target's wrong-class mass follows its
                     rival distribution, while the true-class probability, and so the loss shape, is unchanged
+  --rank-ref FILE   logits [N, 100] of a reference on stand-ins of the forget images; the clean-margin values
+                    are reassigned to images in the order of the reference's margin, so delta and depth go to the
+                    images the reference finds hard while their distribution is unchanged
   --split           train on 80% of the forget set, report the held-out 20% (leakage check)
 """
 import argparse
@@ -63,6 +66,7 @@ p.add_argument("--repair", type=Path)
 p.add_argument("--clean-targets", action="store_true")
 p.add_argument("--strong-aug", action="store_true")
 p.add_argument("--ref-rivals", type=Path)
+p.add_argument("--rank-ref", type=Path)
 p.add_argument("--ref-w", type=float, default=0.5)
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
@@ -128,6 +132,9 @@ z0 = logits(teacher, imgs)
 z0_dev = z0.to(dev)
 y_all = z0.argmax(1)
 m_clean = true_margin(z0, y_all).clamp_min(1e-3)
+if args.rank_ref:  # same margin values, assigned by the reference's own margin order (lowest = hardest)
+    m_ref = true_margin(torch.from_numpy(np.load(args.rank_ref)).float(), y_all)
+    m_clean = m_clean.sort().values[m_ref.argsort().argsort()]
 delta_i = args.delta * (m_clean / m_clean.median()) ** args.margin_power
 # per-class confusion prior: mean T=1 alternative distribution of the teacher, true class masked
 alt = F.softmax(z0.scatter(1, y_all[:, None], -1e9), 1)

@@ -2,3 +2,5 @@
 #   source scripts/_common.sh && POST_CMD="python -m wl.finalize output/E151_verify_e143 --kind output/E120_kind_const/kind_probs.npz --resynth; python -m wl.finalize output/E151_verify_e143 --kind output/E120_kind_const/kind_probs.npz --resynth --mrf" sbatch_node_public resynth 02:00:00 jobs/resynth.txt
 CMD: python -m wl.resynth --split train --device cuda
 CMD: python -m wl.resynth --split test --device cuda
+# GPU 2: decoder verification on the E143+E142 ensemble (E152 = 0.651 on f0 vs 0.643 for E143)
+CMD: python -m wl.verify --id E153_verify_e152 --sources output/E152_ens_143_142 output/E121_analytic_rect_v2 --kind output/E120_kind_const/kind_probs.npz --methods pixelseal trustmark

@@ -91,7 +91,9 @@ are evaluated on a 128×128 grid.
 | E170 | 11-22 | 1 | E104 | synth-v2 (COCO bases, restore/paste/inpaint holes), no wrong-message negatives, no cached maps, SegFormer-B5 | Data diversity + capacity lift PixelSeal and `full` holes | real+synth-v2 | f0 | | | | | | | | planned |
 | E140_w3_noneg, E141_w3_rgbsrm, E142_w3_b5, E143_w2_40ep | 11-22 | 1 | E104/E103 | Ablations on synth-v1: no negatives; + drop agreement; + SegFormer-B5; W2 40 epochs. Numbers clash with E141_w2_msgmaps / E142_w2_long / E143_w2_r50 below; output dirs differ | The agreement channel is constant on synth and misaligned on real; negatives add label noise | real+synth-v1 | f0 | | | | | | | | running |
 | E190–E193 (wave 2) | 11-22 | 2 | E161 | Best recipe again: seed 1 (E190), + Lovász-hinge loss 0.5 (E191, Berman et al. CVPR 2018: surrogate of the Jaccard index the task is scored on), 35 epochs (E192), seed 4 (E193); TTA chained | More diverse members of the best recipe for the final ensemble | real+synth-v1 | f0 | | | | | | | | queued (job 15905158) |
-| E158_verify_e157g | 11-22 | 2 | E157g | `wl.verify` (PS, TM) on the TTA ensemble | Verify gain stacks | none | f0 | | | | | | | | queued (job 15905157) |
+| E198_final_verify | 11-22 | 2 | E197 | verify (PS, TM) on E197 = E157g weights/validation with all-folds twins at test time (E169_tta, E167_tta, E165_tta, E142) via `ensemble --test-runs` | +25 % data at test without biasing the validation | none | f0 | 0.543 | 0.634 | 0.846 | 0.631 | 0.717 | 0.674 | **0.6813** | **Current best.** Test masks agree 98.5 % with E158 (sanity check of the swap) |
+| E158_verify_e157g | 11-22 | 2 | E157g | `wl.verify` (PS, TM) on the TTA ensemble | Verify gain stacks | none | f0 | 0.543 | 0.634 | 0.846 | 0.631 | 0.717 | 0.674 | 0.6786 | +0.006 f0, +0.013 public vs E155g |
+| E196g_ens_plus166 | 11-22 | 2 | E157g | E157g + E166_tta (W8 seed 1) | More members | none | f0 | | | | | | 0.6678 | | Rejected (no gain, too close to E160) |
 | E157g_ens_tta | 11-22 | 2 | E161_tta, E143_tta, E160_tta, E142 | Shared-weight logit ensemble of the TTA versions | TTA and ensembling add up | none | f0 | 0.516 | 0.641 | 0.846 | 0.631 | 0.705 | 0.668 | | Best on f0 (+0.008 over E155g) |
 | E161_tta / E143_tta / E160_tta | 11-22 | 2 | E161 / E143 / E160 | `wl.infer`: 9 integer cell shifts (fixed set, no tuning), shift undone on the output, mean | Variance reduction for free | none | f0 | 0.514 / 0.515 / 0.505 | 0.642 / 0.627 / 0.615 | 0.839 / 0.823 / 0.798 | | | 0.665 / 0.655 / 0.639 | | +0.011 / +0.012 / −0.001: keep TTA for every member |
 | E155g_ens_w8_global | 11-22 | 2 | E161, E160, E143, E142 | Logit ensemble of 4 models, weights shared across methods (4 parameters) | W8 models add diversity | none | f0 | 0.511 | 0.646 | 0.824 | 0.627 | 0.694 | 0.660 | 0.6656 | **Current best public.** Per-method weights (E155) give 0.6645 on f0: the 0.004 difference is the optimism of 12 weights fitted on 102 images; the shared-weight version was submitted |
@@ -257,7 +259,10 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 | 11-22 | 2 | E143_w2_r50 | 0.643 / OOF 0.646 | 0.654 | new best at the time |
 | 11-22 | 2 | E151_verify_e143 | 0.653 / OOF-postproc 0.657 | 0.663 | best until 05:07 |
 | 11-22 | 2 | E153_verify_e152 | 0.663 / OOF-postproc 0.668 | 0.661 | not improved (within public noise) |
-| 11-22 | 2 | E155g_ens_w8_global | 0.660 | 0.6656 | **current best** |
+| 11-22 | 2 | E155g_ens_w8_global | 0.660 | 0.6656 | best until 05:41 |
+| 11-22 | 2 | E157g_ens_tta | 0.668 | — | refused (HTTP 429 rate limit) |
+| 11-22 | 2 | E158_verify_e157g | 0.674 | 0.6786 | best until 06:07 |
+| 11-22 | 2 | E198_final_verify | 0.674 (all-folds test members) | 0.6813 | **current best**; copy in chander2/argos/submissions |
 
 ## Decisions
 

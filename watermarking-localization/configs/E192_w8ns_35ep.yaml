@@ -1,0 +1,6 @@
+id: E192_w8ns_35ep
+parent: E161_w8_noshift
+# One change vs E161: 35 epochs (E142 showed +0.010 from a longer schedule on the W2 recipe).
+train:
+  epochs: 35
+  seed: 3

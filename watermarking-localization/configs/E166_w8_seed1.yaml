@@ -1,0 +1,5 @@
+id: E166_w8_seed1
+parent: E160_w8_decoder_loop
+# Second seed of E160 (honest f0 score): seed noise estimate and an ensemble member.
+train:
+  seed: 1

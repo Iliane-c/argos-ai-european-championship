@@ -1,0 +1,11 @@
+id: E169_w8ns_allfolds_ft
+parent: E161_w8_noshift
+# Fast final model: warm start from E161 (best W8 recipe, 0.651 on f0) and fine-tune 8 epochs on all
+# 5 folds (+25 % real data) at a lower learning rate. ~3x cheaper than training from scratch.
+# f0 is in-sample here: its score is NOT a validation number.
+data:
+  train_folds: [0, 1, 2, 3, 4]
+train:
+  init_from: output/E161_w8_noshift/best.pt
+  epochs: 8
+  lr: 1.0e-4

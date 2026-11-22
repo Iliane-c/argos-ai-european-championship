@@ -282,6 +282,9 @@ def main() -> None:
     ap.add_argument("--mode", default="linear", choices=["linear", "logit", "rank", "stack"])
     ap.add_argument("--global-weights", action="store_true", help="Share weights across all 3 methods")
     ap.add_argument("--tune-oof", action="store_true", help="Also tune OOF post-processing")
+    ap.add_argument("--test-runs", nargs="+", default=None,
+                    help="Same length/order as --runs: take TEST probabilities from these runs instead (e.g. the "
+                         "all-folds retrains), with the weights fitted on the validation of --runs")
     args = ap.parse_args()
 
     val_paths: list[Path] = []
@@ -298,6 +301,14 @@ def main() -> None:
             tp = rp.parent / "test_probs.npz"
             if tp.is_file():
                 test_paths.append(tp)
+
+    if args.test_runs:
+        if len(args.test_runs) != len(args.runs):
+            raise SystemExit("--test-runs must list one run per --runs entry")
+        test_paths = [Path(r) / "test_probs.npz" for r in args.test_runs]
+        missing = [str(p) for p in test_paths if not p.is_file()]
+        if missing:
+            raise SystemExit(f"missing test probabilities: {missing}")
 
     meta_by_name, masks_by_name = load_train_ground_truth(args.data)
     out_dir = Path(args.out)
@@ -316,7 +327,8 @@ def main() -> None:
             val_paths, meta_by_name, masks_by_name, mode=args.mode, per_method=not args.global_weights
         )
         v_names, v_probs = opt["names"], opt["val_probs"]
-        extra_meta = {"mode": args.mode, "weights": opt["weights"], "runs": [str(p) for p in val_paths]}
+        extra_meta = {"mode": args.mode, "weights": opt["weights"], "runs": [str(p) for p in val_paths],
+                      "test_runs": [str(p) for p in test_paths]}
         t_names, t_probs = [], None
         if have_all_tests:
             test_meta_list = json.loads((Path(args.data) / "test" / "metadata.json").read_text(encoding="utf-8"))

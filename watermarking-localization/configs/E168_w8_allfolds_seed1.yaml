@@ -1,0 +1,5 @@
+id: E168_w8_allfolds_seed1
+parent: E165_w8_allfolds
+# Second all-folds W8 seed: averaging two full-data models is the safest final ensemble.
+train:
+  seed: 1

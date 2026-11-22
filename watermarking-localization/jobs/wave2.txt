@@ -1,0 +1,6 @@
+# Wave 2: more members of the best recipe (E161) for the final ensemble. Each run is judged on f0.
+#   source scripts/_common.sh && POST_CMD="for r in E190_w8ns_seed1 E191_w8ns_lovasz E192_w8ns_35ep E193_w8ns_seed4; do python -m wl.infer --run output/\$r --id \${r}_tta; done" sbatch_node_public wave2 03:00:00 jobs/wave2.txt
+configs/E190_w8ns_seed1.yaml
+configs/E191_w8ns_lovasz.yaml
+configs/E192_w8ns_35ep.yaml
+configs/E193_w8ns_seed4.yaml

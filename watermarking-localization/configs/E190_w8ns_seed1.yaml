@@ -1,0 +1,5 @@
+id: E190_w8ns_seed1
+parent: E161_w8_noshift
+# Best recipe (E161, 0.665 with TTA), second seed: ensemble diversity + seed-noise estimate.
+train:
+  seed: 1

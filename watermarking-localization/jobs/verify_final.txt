@@ -1,0 +1,3 @@
+# Decoder verification (PS, TM) on the TTA ensemble with shared weights (E157g).
+#   source scripts/_common.sh && sbatch_node_public vfinal 00:40:00 jobs/verify_final.txt
+CMD: python -m wl.verify --id E158_verify_e157g --sources output/E157g_ens_tta output/E121_analytic_rect_v2 --kind output/E120_kind_const/kind_probs.npz --methods pixelseal trustmark

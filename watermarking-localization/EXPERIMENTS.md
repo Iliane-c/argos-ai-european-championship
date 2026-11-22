@@ -79,18 +79,36 @@ are evaluated on a 128×128 grid.
 
 | ID | Time | Owner | Parent | Change | Hypothesis | Data | Val | PS | TM | SS | Full | Patch | Mean | Public | Verdict |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| E182_gate_e158 | 11-22 | 1 | E158 | `wl.verify --regate --max-area-q 0.9` (CPU, no decoding): a refined box larger than the 90 % quantile of the method's training patch box areas (folds 1–4 when scoring f0: PS 0.36, TM 0.39, SS 0.30 of the image) reverts to the first source | A significant z only proves that the message is somewhere in the box; oversized boxes are *containing* boxes and cost clean-class IoU | none | f0 | 0.545 | 0.654 | 0.846 | 0.631 | 0.732 | 0.682 | | **Keep** (+0.007 vs E158; +0.006 / +0.007 on E153 / E156; any quantile 0.75–0.95 gives +0.005–0.007 and never a loss). Only 2 f0 images flip (2 wins / 0 losses), but the test statistics support the mechanism: accepted test boxes with z < 8 have a median area of 0.16–0.33, those with z ≥ 8 0.02–0.08. Reverts 21 of the 89 refined test boxes |
+| E183_decision_rules | 11-22 | 1 | E161_tta | Cross-fitted Platt calibration, then Bayes-optimal decisions: RankSEG-RMA (= current `eiou_decide`), dependence-aware variant (per-image latent logit shift, s = 0.5–3, after Wang & Dai 2026), rectangle model selection by expected mIoU, rectangle snap | Decision theory recovers part of the per-image threshold oracle (+0.03) | none | f0 | 0.514 | 0.642 | 0.839 | | | 0.6646 | | **Drop**: same masks (Δ = 0.0000; rectangle snap −0.002 to −0.005). The maps are near-binary (4–10 % of cells in (0.05, 0.95)), so every decision rule returns the same mask |
+| E184_stack_context | 11-22 | 1 | E161_tta | (a) Logarithmic opinion pool: per-method cross-fitted logistic stacking of the E161_tta, E143_tta, E160_tta and E142 logits (extremizing allowed); (b) auto-context: per-cell logistic regression on multi-scale smoothed logits, local max, image statistics and border distance | Learned pooling or spatial context re-ranks the cells | none | f0 | | | | | | 0.652 / 0.645 | | **Drop**: −0.013 (stacking), −0.020 (auto-context, sign test p = 0.002). The cell log-loss does not track per-image mIoU |
+| E185_edge_aware | 11-22 | 1 | E161_tta | Edge-aware refinement of the calibrated beliefs before the eIoU decision: guided filter (r 2–4), SLIC / Felzenszwalb superpixel pooling, bilateral dense-CRF mean field (9×9 window); setting chosen by nested cross-fitting | Snap masks to object boundaries | none | f0 | | | | | | 0.6645 | | **Drop**: −0.0001 with the nested choice, ±0.000 for the best fixed setting: nothing to sharpen on near-binary maps |
+| E186_forensic_stats | 11-22 | 1 | — | Blind forensic statistics on the 128 grid: Splicebuster (3rd-order residual co-occurrences, per-image 2-component Gaussian mixture by EM), local high-pass energy, local noise level (MAD) | Edit traces (inpainting, transplantation) show regions the watermark does not | none | all510 | | | | | | | | **Drop**: within-image cell AUC 0.50 (Splicebuster), 0.59 (energy), 0.58 (noise); on f0 PixelSeal 0.48–0.51, where the model has 0.67–0.69 |
 | E180 | 11-22 | 1 | E104 | `wl.refine`: kind gating from cached whole-image bit accuracy | Wrong-kind maps cost ~0.5 each; decoding fixes them for free | none | f0 | | | | | | | | planned |
 | E173 | 11-22 | 1 | E170 | HRNet-W48 + FPN | High-res stream helps faint patterns; ensemble diversity | real+synth-v2 | f0 | | | | | | | | planned |
 | E172 | 11-22 | 1 | E103 | synth-v2, 35 epochs | Same W2 recipe gains from data diversity | real+synth-v2 | f0 | | | | | | | | planned |
 | E171 | 11-22 | 1 | E170 | SegFormer-B2 | Direct comparison with E104: gain of synth-v2 + fixes | real+synth-v2 | f0 | | | | | | | | planned |
 | E170 | 11-22 | 1 | E104 | synth-v2 (COCO bases, restore/paste/inpaint holes), no wrong-message negatives, no cached maps, SegFormer-B5 | Data diversity + capacity lift PixelSeal and `full` holes | real+synth-v2 | f0 | | | | | | | | planned |
 | E140_w3_noneg, E141_w3_rgbsrm, E142_w3_b5, E143_w2_40ep | 11-22 | 1 | E104/E103 | Ablations on synth-v1: no negatives; + drop agreement; + SegFormer-B5; W2 40 epochs. Numbers clash with E141_w2_msgmaps / E142_w2_long / E143_w2_r50 below; output dirs differ | The agreement channel is constant on synth and misaligned on real; negatives add label noise | real+synth-v1 | f0 | | | | | | | | running |
+| E190–E193 (wave 2) | 11-22 | 2 | E161 | Best recipe again: seed 1 (E190), + Lovász-hinge loss 0.5 (E191, Berman et al. CVPR 2018: surrogate of the Jaccard index the task is scored on), 35 epochs (E192), seed 4 (E193); TTA chained | More diverse members of the best recipe for the final ensemble | real+synth-v1 | f0 | | | | | | | | queued (job 15905158) |
+| E205_attrib | 11-22 | 2 | — | `wl.attrib`: input-x-gradient attribution of the frozen PS/TM extractors for the true message, z vs 8 random messages per cell | Pixel-level evidence for PS/TM holes | none | train (60 img) | | | | | | | | **Rejected at the 60-image check: no signal** (cell AUC PS full 0.48, PS patch 0.49, TM 0.49–0.51). With the re-synthesis result, two independent pixel-level probes find nothing: the readable evidence is the decoders' coarse output, exploited by W8 and verify |
+| E198g_final_gate | 11-22 | 2 | E198 | Size gate on verified boxes (Rahul, E182): reject refined boxes larger than the 0.9 quantile of training patch areas, CPU re-gate | z only proves the message is inside the box; oversized boxes are containing boxes | none | f0 | 0.545 | 0.654 | 0.846 | 0.631 | 0.732 | 0.6816 | **0.6863** | Best. f0: 2 images changed (2/0, CI [0, +0.021]); public +0.005 is the independent confirmation; 20 test boxes reverted |
+| E203_ens_142tta | 11-22 | 2 | E197 | E142 replaced by E142_tta (0.633 vs 0.623 alone) | Stronger member | none | f0 | | | | | | 0.6682 | | No gain (+0.0002) |
+| E198_final_verify | 11-22 | 2 | E197 | verify (PS, TM) on E197 = E157g weights/validation with all-folds twins at test time (E169_tta, E167_tta, E165_tta, E142) via `ensemble --test-runs` | +25 % data at test without biasing the validation | none | f0 | 0.543 | 0.634 | 0.846 | 0.631 | 0.717 | 0.674 | **0.6813** | **Current best.** Test masks agree 98.5 % with E158 (sanity check of the swap) |
+| E158_verify_e157g | 11-22 | 2 | E157g | `wl.verify` (PS, TM) on the TTA ensemble | Verify gain stacks | none | f0 | 0.543 | 0.634 | 0.846 | 0.631 | 0.717 | 0.674 | 0.6786 | +0.006 f0, +0.013 public vs E155g |
+| E196g_ens_plus166 | 11-22 | 2 | E157g | E157g + E166_tta (W8 seed 1) | More members | none | f0 | | | | | | 0.6678 | | Rejected (no gain, too close to E160) |
+| E157g_ens_tta | 11-22 | 2 | E161_tta, E143_tta, E160_tta, E142 | Shared-weight logit ensemble of the TTA versions | TTA and ensembling add up | none | f0 | 0.516 | 0.641 | 0.846 | 0.631 | 0.705 | 0.668 | | Best on f0 (+0.008 over E155g) |
+| E161_tta / E143_tta / E160_tta | 11-22 | 2 | E161 / E143 / E160 | `wl.infer`: 9 integer cell shifts (fixed set, no tuning), shift undone on the output, mean | Variance reduction for free | none | f0 | 0.514 / 0.515 / 0.505 | 0.642 / 0.627 / 0.615 | 0.839 / 0.823 / 0.798 | | | 0.665 / 0.655 / 0.639 | | +0.011 / +0.012 / −0.001: keep TTA for every member |
+| E155g_ens_w8_global | 11-22 | 2 | E161, E160, E143, E142 | Logit ensemble of 4 models, weights shared across methods (4 parameters) | W8 models add diversity | none | f0 | 0.511 | 0.646 | 0.824 | 0.627 | 0.694 | 0.660 | 0.6656 | **Current best public.** Per-method weights (E155) give 0.6645 on f0: the 0.004 difference is the optimism of 12 weights fitted on 102 images; the shared-weight version was submitted |
+| E161_w8_noshift (final) | 11-22 | 2 | E160 | W8 without the 2×2 interleave (one extractor pass) | Is the interleave needed? | real+synth-v1 | f0 | 0.504 | 0.640 | 0.819 | 0.622 | 0.687 | 0.654 | | **Best single model** (+0.011 vs E143, TM and patches), 4× cheaper than E160 |
+| E160_w8_decoder_loop (final) | 11-22 | 2 | E143 | W8 with 2×2 interleave | Decoder in the loop | real+synth-v1 | f0 | ≈0.50 | ≈0.61 | ≈0.80 | ≈0.61 | ≈0.66 | 0.641 | | Ties E143: the epoch-10 lead (+0.025) was faster convergence, not a better optimum |
+| E153_verify_e152 | 11-22 | 2 | E152 | `wl.verify` (PS, TM) on the E143+E142 ensemble | Verify gain stacks on the ensemble | none | f0 | 0.541 | 0.628 | 0.820 | 0.634 | 0.692 | 0.663 | 0.661 | +0.010 on f0 but −0.002 public vs E151: not confirmed, treated as a tie (~0.66) |
 | E152_ens_143_142 | 11-22 | 2 | E143, E142 | Logit ensemble of E143 (ResNet-50) and E142 (ResNet-34, 50 epochs) | Different errors average out | none | f0 | 0.504 | 0.630 | 0.820 | 0.634 | 0.669 | 0.651 | | Keep (+0.008 over E143, mostly TM). E153 = verify on it, queued |
 | E142_w2_long | 11-22 | 2 | E103 | W2, 50 epochs | E103 under-trained | real+synth-v1 | f0 | 0.488 | 0.604 | 0.778 | 0.611 | 0.636 | 0.623 | | +0.010 over E103, below E143: capacity matters more than length |
 | E151 + finalize --mrf | 11-22 | 2 | E151 | Mean-field Ising prior on calibrated beliefs, beta per method chosen by inner CV | Holes/patches are compact | none | f0 | 0.527 | 0.615 | 0.817 | 0.627 | 0.679 | 0.6529 ± 0.014 | | No gain: inner CV picks beta=0 almost always (CNN maps already smooth). Kept for noisy evidence (resynth) |
 | E151 + wl.sizer | 11-22 | 2 | E151 | Size-calibrated top-k: ridge on log region size from image statistics, shrunk to the eiou size | `wl.oracle_k`: true size on the same ranking gives 0.687 vs 0.653 | none | f0 | 0.552 | — | — | — | — | 0.631 | | Rejected (−0.022, negative in 3/5 groups). Ranking, not size, is the ceiling: oracle best-k only 0.56–0.59 on PS/TM holes |
-| E154_resynth | 11-22 | 2 | E151 | `wl.resynth`: re-embed with the true message and 8 random messages, local correlation of high-pass image with templates, z vs the random-message null; fused via `finalize --resynth [--mrf]` | Pixel-level evidence for PS/TM holes (IoU 0.16–0.18 today) | none | f0 | | | | | | | | queued (job 15904930) |
-| E160–E164 (W8) | 11-22 | 2 | E143 | `w8_decoder_loop`: frozen PixelSeal/TrustMark extractors in the forward pass, per-position agreement with the known message (2×2 interleave) fused with learned features. E161 no interleave, E162 PS+TM only, E164 + TrustMark-RM residual | Fixes why E141 failed (evidence constant on synth, misaligned with shifts) | real+synth-v1 | f0 | | | | | | | | running (job 15904808). Epoch 10: E160 0.635 / E161 0.631 vs E143 0.610 at the same epoch (+0.025, gain on PS, TM and SS). E164 ~10 min/epoch (RM at 512 px), ends ~08:00 |
+| E154_resynth | 11-22 | 2 | E151 | `wl.resynth`: re-embed with the true message and 8 random messages, local correlation of the high-pass image with the templates, z vs the random-message null; whole image + box-wise for patches; fused via `finalize --resynth [--resynth-box] [--mrf]` | Pixel-level evidence for PS/TM holes | none | all510 / f0 | 0.527 | 0.615 | 0.817 | 0.627 | 0.679 | 0.6529 ± 0.014 | | **Rejected: no signal.** Cell AUC PS full 0.498, PS patch 0.492, TM 0.51–0.53, SS 0.55–0.60; fusion unchanged (calibrator gives it ~0 weight). Re-embedding does not reproduce the residual well enough after the data pipeline, while the (robust) decoders still read the mark: localisation must come from decoder evidence, not template matching. First run had NaN maps (fixed in 91f833b) |
+| E160–E164 (W8) | 11-22 | 2 | E143 | `w8_decoder_loop`: frozen PixelSeal/TrustMark extractors in the forward pass, per-position agreement with the known message (2×2 interleave) fused with learned features. E161 no interleave, E162 PS+TM only, E164 + TrustMark-RM residual | Fixes why E141 failed (evidence constant on synth, misaligned with shifts) | real+synth-v1 | f0 | | | | | | | | E160 epoch 23: 0.640 (caught up by E143, the early lead was faster convergence); E161 epoch 23: 0.651 (+0.008 vs E143, TM and patches), 4x cheaper. Epoch 10: E160 0.635 / E161 0.631 vs E143 0.610 at the same epoch (+0.025, gain on PS, TM and SS). E164 ~10 min/epoch (RM at 512 px), ends ~08:00 |
 | E151_verify_e143 | 11-22 | 2 | E143 | `wl.verify` on E143 with E121 boxes, `--methods pixelseal trustmark` | Verification gains (E150) stack on the best model | none | f0 | 0.527 | 0.615 | 0.817 | 0.627 | 0.679 | 0.653 | 0.663 | **Current best** (+0.010 val, +0.009 public). 34 PS/TM patches: 5 confirmed, 8 repaired, 21 untouched |
 | E145_w2_ps_only | 11-22 | 2 | E103 | W2 trained on PixelSeal only (`data.methods: [pixelseal]`) | A specialist lifts the weakest method (PS ~0.50) | real+synth-v1 | f0 | 0.455 | — | — | 0.484 | 0.427 | 0.455 | | Worse than E143 on PS (0.496): less data hurts more than specialisation helps |
 | E143_w2_r50 + finalize (±--ac-z) | 11-22 | 2 | E143 | `wl.finalize` cell calibrator: model logit + kind (+ decoder z), expected-IoU decision, cross-fitted | Product-of-experts fusion of model and decoder evidence | none | f0 | 0.497 | 0.616 | 0.817 | 0.627 | 0.659 | 0.6433 ± 0.040 (0.6431 without z) | | No gain: the model already absorbs the decoder evidence |
@@ -178,16 +196,59 @@ are evaluated on a 128×128 grid.
 | T7 | Ensembles and stacking (small CNN on probs + T1 maps, trained out-of-fold) | | |
 | T8 | Region-wise binomial p-values on known-bit agreement (calibrated maps); multi-scale sliding-window decoding + linear probe (SS) | | |
 
+## Lessons learned (night of 11-21/22)
+
+1. Never judge a model mid-training: W8 led by +0.025 at epoch 10 and tied E143 at the end (faster convergence, same optimum). Compare final checkpoints only.
+2. Check a new evidence map on a few images (no NaN, AUC) before a full run and a fusion: the first re-synthesis run had NaN maps.
+3. What wins is decoder evidence and model diversity: verify +0.010 (three times), ensembles +0.008 / +0.013. Post-processing smooth CNN maps (MRF, sizer, decoder z in the calibrator) and template matching (re-synthesis) gave nothing.
+4. f0 has 102 images: prefer the version with the fewest free parameters (shared ensemble weights), and require a public confirmation (E153: +0.010 f0, −0.002 public).
+
+## Statistical methods round (E182–E186)
+
+Question: which state-of-the-art statistical (non-deep-learning) methods still add accuracy on top of the
+W2 / W8 maps? Every test runs on f0 (102 images), cross-fitted or with a rule fixed in advance, and is
+compared image by image with `python -m wl.compare` (paired bootstrap CI and sign test).
+
+What limits the post-hoc layer:
+
+- The maps are near-binary: only 4–10 % of the cells lie in (0.05, 0.95). Even an oracle that picks the
+  best threshold for each image only reaches 0.6955 (E161_tta: 0.6647). Decision rules can win at most
+  +0.03, and none wins any of it.
+- The remaining error is missing evidence. On f0, E161_tta predicts nothing for 8 of 17 PixelSeal patches
+  (none with IoU > 0.5), for 5 of 17 PixelSeal holes and for 6 of 17 TrustMark holes.
+- Decoder evidence is bimodal: on f0, the verified patch boxes have z ≥ 9.8 or z ≤ 2.3. The accepted test
+  boxes with z < 8 are far larger than real patches (median area 0.16–0.33 against 0.04).
+
+| Family | State of the art | Run | Result |
+|---|---|---|---|
+| Bayes-optimal IoU decision | RankSEG / RankSEG-RMA (Dai & Li, JMLR 2023; arXiv 2510.15362); dependence-aware RankSEG (Wang & Dai, arXiv 2609.38930) | E183 | 0: `eiou_decide` already is the RMA rule |
+| Calibration and forecast aggregation | Platt scaling; logarithmic opinion pool with extremizing (Satopää et al., IJF 2014) | E184a | −0.013 |
+| Contextual stacking | Auto-context (Tu & Bai, TPAMI 2010) | E184b | −0.020 |
+| Edge-aware MRF / CRF | Dense CRF (Krähenbühl & Koltun, NeurIPS 2011), fast bilateral solver (Barron & Poole, ECCV 2016), guided filter, superpixel pooling | E185 | 0 |
+| Blind forensic statistics | Splicebuster (Cozzolino, Poggi & Verdoliva, WIFS 2015), local noise inconsistency | E186 | AUC 0.50–0.59 |
+| A-contrario detection and multiple testing | Number of false alarms (Desolneux, Moisan & Morel), random-key z (Fernandez et al., WIFS 2023), e-BH block tests for watermark localization (arXiv 2611.02030) | E182 | **+0.007** (size gate) |
+
+Other checks, all negative: blind border priors for holes (frames, strips) give at most +0.004; no image is
+a near-duplicate of another (32×32 thumbnail correlation < 0.95 everywhere), so StegaStamp masks cannot be
+transferred to PixelSeal or TrustMark twins.
+
+Alternative to the size gate: z ≥ 6 for searched boxes (Bonferroni / NFA over the rectangle search) gives
+the same f0 gain. On test, however, it keeps 9 boxes larger than the 90 % quantile (z 6–8) and drops small
+boxes with z 4–6. That is the wrong way round under the asymmetric loss: a wrong small box costs about
+0.01, a right one gains about 0.3. The size gate is preferred.
+
 ## Ideas queue (what to try next, and why)
 
 Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) and kept only if it beats the fold noise (~0.01–0.02) and moves the slice it targets.
 
 | Idea | Targets | Evidence that motivates it | Status |
 |---|---|---|---|
-| Differential re-synthesis matched filter (`wl.resynth`): re-embed with true vs random messages, z vs random-message null | PS/TM `full` holes (small-region IoU 0.16–0.18, biggest loss) | `wl.diagnose`; `wl.oracle_k`: even the best size on the current ranking caps at 0.56–0.59, so better evidence is needed | queued |
+| Differential re-synthesis matched filter (`wl.resynth`) | PS/TM `full` holes | `wl.diagnose`, `wl.oracle_k` | **rejected**: cell AUC ~0.5 on PS, 0.53 on TM |
 | Box-wise re-synthesis for patches (re-embed the candidate crop at native scale, `wl.resynth --boxes-from`, `finalize --resynth-box`) | PS patch (IoU 0.23), TM patch | verify (native-scale decoding) already +0.01; same principle at pixel level | coded (jobs/resynth_box.txt); launched only if whole-image resynth shows signal |
 | Ensemble of W8 + E143 + E142 with OOF weights, then verify | all | E152 (E143+E142) +0.008; verify +0.010 twice | after W8 finishes |
-| Retrain the finalist on all 5 folds (fixed epochs from CV) | all | +25 % data | if GPU time remains |
+| Test-time augmentation with 9 integer cell shifts (`wl.infer`), fixed set, no tuning | all (variance) | standard, watermark-safe (shift undone on the output) | coded, jobs/tta_ft.txt |
+| Warm start (`train.init_from`): fine-tune the best recipe from its checkpoint on all folds, 8 epochs (E169) | all, +25 % data at ~1/3 of the cost | E161 is the best W8 recipe (0.651 f0) | coded, jobs/tta_ft.txt |
+| Retrain the finalist on all 5 folds (fixed epochs from CV) | all | +25 % data | E165/E167/E168 running (job finals) |
 | MRF prior on resynth evidence | holes | MRF useless on smooth CNN maps, expected to help on noisy pixel evidence | runs in the resynth job |
 | Rejected: size calibration (`wl.sizer`), MRF on E151, `--ac-z` fusion, PixelSeal-only specialist (E145) | — | all negative out of sample, see log | — |
 
@@ -199,7 +260,13 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 | 11-22 | 2 | E120_kind_const | 0.452 (honest all510) | 0.4451 | below best, leaderboard unchanged |
 | 11-22 | 2 | E102_segformer_b2 | 0.407 / OOF 0.432 | 0.4239 | below best |
 | 11-22 | 2 | E143_w2_r50 | 0.643 / OOF 0.646 | 0.654 | new best at the time |
-| 11-22 | 2 | E151_verify_e143 | 0.653 / OOF-postproc 0.657 | 0.663 | **current best** |
+| 11-22 | 2 | E151_verify_e143 | 0.653 / OOF-postproc 0.657 | 0.663 | best until 05:07 |
+| 11-22 | 2 | E153_verify_e152 | 0.663 / OOF-postproc 0.668 | 0.661 | not improved (within public noise) |
+| 11-22 | 2 | E155g_ens_w8_global | 0.660 | 0.6656 | best until 05:41 |
+| 11-22 | 2 | E157g_ens_tta | 0.668 | — | refused (HTTP 429 rate limit) |
+| 11-22 | 2 | E158_verify_e157g | 0.674 | 0.6786 | best until 06:07 |
+| 11-22 | 2 | E198_final_verify | 0.674 (all-folds test members) | 0.6813 | best until 06:32 |
+| 11-22 | 2 | E198g_final_gate | 0.6816 (E198 + Rahul's size gate `--max-area-q 0.9`, `--regate`) | **0.6863** | **current best** (+0.005 public: confirms the gate, which on f0 rested on 2 images only); copy in submissions |
 
 ## Decisions
 
@@ -217,6 +284,10 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 - 2026-11-22: Whole-image re-embedding correlation (NCC of the image with `embed(x, m) - x`, 32 px windows)
   measured on train with the real embedders: AUC 0.72–0.77 for `full` holes (TrustMark, StegaStamp), ~0.5
   for patches (wrong scale). A side cue only.
+- 2026-11-22: Verify runs use `--max-area-q 0.9`; on a run that already exists, `wl.verify --regate` applies
+  the same gate on CPU in seconds (E182). Post-hoc decision rules, smoothing, stacking and blind forensic
+  statistics are exhausted on these maps (E183–E186): further gains need new evidence for PixelSeal patches
+  and PixelSeal / TrustMark holes.
 - 2026-11-22: Training-free ceiling is ~0.45–0.49 (honest, cross-fitted); learned W2 models reach 0.62–0.64.
   The statistical track is used as a verifier/fusion stage on top of W2, not as a standalone predictor.
 - 2026-11-22: `wl.verify` is applied to PixelSeal and TrustMark only (E150: helps PS/TM, hurts StegaStamp).

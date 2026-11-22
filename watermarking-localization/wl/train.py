@@ -148,6 +148,14 @@ def run_training(
     meta_by_name, masks_by_name = load_train_ground_truth(data_root)
 
     model = build_model(cfg).to(device)
+    init_from = train_cfg.get("init_from")
+    if init_from:  # warm start: copy every weight whose name and shape match (new layers keep their init)
+        src = torch.load(init_from, map_location="cpu")
+        src = src.get("model", src)
+        own = model.state_dict()
+        loaded = {k: v for k, v in src.items() if k in own and own[k].shape == v.shape}
+        model.load_state_dict(loaded, strict=False)
+        print(f"[{exp_id}] warm start from {init_from}: {len(loaded)}/{len(own)} tensors loaded", flush=True)
     criterion = CompositeLoss(cfg.get("loss", {})).to(device)
     epochs = int(train_cfg.get("epochs", 20))
     lr = float(train_cfg.get("lr", 3e-4))

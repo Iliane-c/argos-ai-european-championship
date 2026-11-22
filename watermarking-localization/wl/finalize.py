@@ -110,7 +110,7 @@ def load_resynth(split: str, names: list[str], sub: str = "resynth") -> dict[str
     if not path.is_file():
         raise SystemExit(f"ERROR: {path} missing; run `python -m wl.resynth --split {split}` first")
     z = np.load(path)
-    table = {str(n): m.astype(np.float32) for n, m in zip(z["names"], z["z128"])}
+    table = {str(n): np.nan_to_num(m.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0) for n, m in zip(z["names"], z["z128"])}
     missing = [n for n in names if n not in table]
     if missing:
         raise SystemExit(f"ERROR: {len(missing)} images missing from {path}")

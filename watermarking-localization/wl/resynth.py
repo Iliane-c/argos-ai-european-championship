@@ -35,6 +35,7 @@ OUT_DIR = ROOT_DIR / "output" / "resynth"
 def _box_blur(x: np.ndarray, k: int) -> np.ndarray:
     """Separable box blur on the last two axes (reflect padding)."""
     pad = k // 2
+    x = np.asarray(x, dtype=np.float64)  # cumulative sums in float32 lose precision -> tiny negatives
     xp = np.pad(x, [(0, 0)] * (x.ndim - 2) + [(pad, pad), (pad, pad)], mode="reflect")
     c = np.cumsum(np.cumsum(xp, axis=-1), axis=-2)
     c = np.pad(c, [(0, 0)] * (x.ndim - 2) + [(1, 0), (1, 0)])
@@ -70,11 +71,12 @@ def resynth_z(img: np.ndarray, bits: np.ndarray, wm_model, n_keys: int, seed: in
     den_t = np.stack(den_t)
     den_y = _cell_sum((hy * hy).sum(0))
     num_w = _box_blur(num, win)
-    corr = num_w / np.sqrt(_box_blur(den_t, win) * _box_blur(den_y[None], win) + 1e-6)
+    den = np.clip(_box_blur(den_t, win), 0, None) * np.clip(_box_blur(den_y[None], win), 0, None)
+    corr = num_w / np.sqrt(den + 1e-6)
     null = corr[1:]
     mu = null.mean(0)
     sigma = float(np.std(null - mu[None])) + 1e-6                      # pooled null scale
-    return ((corr[0] - mu) / sigma).astype(np.float32)
+    return np.nan_to_num((corr[0] - mu) / sigma, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
 def candidate_box(prob: np.ndarray, margin_cells: int = 4, min_cells: int = 8) -> tuple[int, int, int, int] | None:
@@ -124,10 +126,10 @@ def resynth_box_z(img: np.ndarray, bits: np.ndarray, wm_model, box, n_keys: int,
     gh, gw = yy.shape[0] // CELL, yy.shape[1] // CELL
     den_y = yy.reshape(gh, CELL, gw, CELL).sum(axis=(1, 3))
     num, den = np.stack(nums), np.stack(dens)
-    corr = _box_blur(num, win) / np.sqrt(_box_blur(den, win) * _box_blur(den_y[None], win) + 1e-6)
+    corr = _box_blur(num, win) / np.sqrt(np.clip(_box_blur(den, win), 0, None) * np.clip(_box_blur(den_y[None], win), 0, None) + 1e-6)
     null = corr[1:]
     mu = null.mean(0)
-    z_box = (corr[0] - mu) / (float(np.std(null - mu[None])) + 1e-6)
+    z_box = np.nan_to_num((corr[0] - mu) / (float(np.std(null - mu[None])) + 1e-6), nan=0.0, posinf=0.0, neginf=0.0)
     out = np.zeros((GRID, GRID), dtype=np.float32)
     cy, cx = y0 // CELL, x0 // CELL
     out[cy:cy + gh, cx:cx + gw] = z_box[: GRID - cy, : GRID - cx]
@@ -144,6 +146,7 @@ def _stats(names, zs, data_root: Path) -> None:
         g = masks[n].astype(bool)
         if g.all() or (~g).all():
             continue
+        z = np.nan_to_num(z)
         zin, zout = z[g], z[~g]
         # AUC of z for watermarked vs clean cells (rank statistic, subsampled)
         rng = np.random.default_rng(0)

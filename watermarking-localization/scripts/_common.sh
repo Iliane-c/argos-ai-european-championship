@@ -36,11 +36,28 @@ require_cmd() {
     fi
 }
 
+# Cluster rule (organisers, 22 Nov): the WHOLE TEAM may have at most ONE job at a time,
+# running or queued, reservation or public queue alike (every job = one exclusive 4-GPU node).
+# squeue -u $USER cannot see teammates, so list every team member here.
+TEAM_USERS="${TEAM_USERS:-chikhaoui1,chander2}"
+team_guard() {
+    require_cmd squeue
+    local n
+    n=$(squeue -h -u "$TEAM_USERS" | wc -l)
+    if (( n > 0 )); then
+        echo "REFUSED: the team already has $n job(s) (one node per team, running + queued):" >&2
+        squeue -u "$TEAM_USERS" >&2
+        echo "Use the idle GPUs of that job instead: scripts/run_on_job.sh <jobid> <gpu> \"<cmd>\"" >&2
+        return 1
+    fi
+}
+
 sbatch_gpu() {
     local job_name="$1"
     local walltime="$2"
     local wrap_cmd="$3"
     require_cmd sbatch
+    team_guard || return 1
     mkdir -p "$ROOT_DIR/output"
     sbatch \
         --job-name="$job_name" \
@@ -62,6 +79,7 @@ sbatch_node() {
     local walltime="$2"
     shift 2
     require_cmd sbatch
+    team_guard || return 1
     mkdir -p "$ROOT_DIR/output/logs"
     sbatch \
         --job-name="$job_name" \
@@ -79,12 +97,13 @@ sbatch_node() {
 }
 
 # Same as sbatch_node, but outside the cispahack reservation: the job goes to the general JURECA
-# queue (may wait longer) and does not count towards the team's one-node limit on the reservation.
+# queue (may wait longer). It STILL counts towards the team's one-job limit (see team_guard).
 sbatch_node_public() {
     local job_name="$1"
     local walltime="$2"
     shift 2
     require_cmd sbatch
+    team_guard || return 1
     mkdir -p "$ROOT_DIR/output/logs"
     local script="$ROOT_DIR/jobs/.run_node_public.sh"
     grep -v -- "--reservation" "$ROOT_DIR/jobs/run_node.sh" > "$script"

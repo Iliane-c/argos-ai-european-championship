@@ -174,6 +174,8 @@ def main() -> None:
         teacher, forget_imgs, device=device, batch_size=args.batch_size
     )
     y_forget = forget_logits.argmax(dim=1)
+    active_forget_classes = sorted(int(c) for c in y_forget.unique().tolist())
+    active_forget_set = set(active_forget_classes)
 
     pool_imgs = _load_pool_images(args.pool, target_size=img_size, max_candidates=args.max_pool_candidates)
     pool_feats, pool_logits = extract_features_and_logits(
@@ -190,6 +192,7 @@ def main() -> None:
     kept_margin = top2_vals[:, 0] - top2_vals[:, 1]
 
     selected_chunks: list[torch.Tensor] = []
+    selected_y_chunks: list[torch.Tensor] = []
     per_class_counts: list[int] = []
     synth_added = 0
     rng = np.random.default_rng(args.seed)
@@ -220,14 +223,17 @@ def main() -> None:
 
         if len(cls_imgs) > 0:
             selected_chunks.append(cls_imgs)
+            selected_y_chunks.append(torch.full((len(cls_imgs),), c, dtype=torch.long))
         per_class_counts.append(int(len(cls_imgs)))
 
     if not selected_chunks:
         raise ValueError("No retain proxy images survived deduplication and class selection")
 
     all_selected = torch.cat(selected_chunks, dim=0)
+    all_selected_y = torch.cat(selected_y_chunks, dim=0)
     perm = torch.randperm(len(all_selected), generator=torch.Generator().manual_seed(args.seed))
     all_selected = all_selected[perm]
+    all_selected_y = all_selected_y[perm]
 
     if args.audit_count >= len(all_selected):
         raise ValueError(
@@ -236,13 +242,22 @@ def main() -> None:
 
     if args.audit_count > 0:
         retain_fit = all_selected[: -args.audit_count].numpy()
-        retain_audit = all_selected[-args.audit_count :].numpy()
+        retain_audit_t = all_selected[-args.audit_count :]
+        audit_y = all_selected_y[-args.audit_count :]
+        active_mask = torch.tensor([int(cls_id) in active_forget_set for cls_id in audit_y.tolist()], dtype=torch.bool)
+        retain_audit = retain_audit_t.numpy()
+        retain_audit_active = retain_audit_t[active_mask].numpy()
+        retain_audit_inactive = retain_audit_t[~active_mask].numpy()
     else:
         retain_fit = all_selected.numpy()
         retain_audit = np.empty((0, img_size, img_size, 3), dtype=np.uint8)
+        retain_audit_active = np.empty((0, img_size, img_size, 3), dtype=np.uint8)
+        retain_audit_inactive = np.empty((0, img_size, img_size, 3), dtype=np.uint8)
 
     np.save(args.out_dir / "retain_fit.npy", retain_fit)
     np.save(args.out_dir / "retain_audit.npy", retain_audit)
+    np.save(args.out_dir / "retain_audit_active.npy", retain_audit_active)
+    np.save(args.out_dir / "retain_audit_inactive.npy", retain_audit_inactive)
 
     meta = {
         "pool_total": int(len(pool_imgs)),
@@ -251,6 +266,9 @@ def main() -> None:
         "selected_total": int(len(all_selected)),
         "fit_count": int(len(retain_fit)),
         "audit_count": int(len(retain_audit)),
+        "audit_active_count": int(len(retain_audit_active)),
+        "audit_inactive_count": int(len(retain_audit_inactive)),
+        "active_forget_classes": active_forget_classes,
         "synth_mixup_added": synth_added,
         "active_classes": sum(1 for c in per_class_counts if c > 0),
         "min_per_class_actual": min(per_class_counts),

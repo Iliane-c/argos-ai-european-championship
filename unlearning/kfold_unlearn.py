@@ -13,7 +13,9 @@ import torch.nn.functional as F
 from hybrid_unlearn import add_hybrid_args, config_from_args, evaluate_unlearning, run_hybrid_unlearning
 from ul import (
     add_common_io_args,
+    apply_grad_mask,
     augment_batch,
+    build_active_head_mask,
     build_model,
     compute_diagonal_fisher,
     delta_cosine_matrix,
@@ -73,6 +75,7 @@ def _retain_polish_model(
     w_feat_retain: float,
     fisher_retain: dict[str, torch.Tensor] | None,
     orig_params: dict[str, torch.Tensor],
+    head_mask: dict[str, torch.Tensor] | None = None,
 ) -> None:
     if epochs <= 0:
         return
@@ -102,6 +105,8 @@ def _retain_polish_model(
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
+        if head_mask is not None:
+            apply_grad_mask(student, head_mask)
         torch.nn.utils.clip_grad_norm_(opt_params, 1.0)
         scaler.step(opt)
         scaler.update()
@@ -114,10 +119,14 @@ def _selection_score(metrics: dict[str, float | bool], has_shadow: bool) -> floa
         return float(metrics["final_score"])
     ce_m = float(metrics["forget_clean_ce_mean"])
     ce_s = float(metrics["forget_clean_ce_std"])
-    ret_sim = float(metrics.get("retain_kl_similarity", 1.0))
-    # Heuristic proxy when no shadow_gold is passed: encourage gold-like skewed CE while keeping retain drift low
-    ce_score = math.exp(-0.5 * ((ce_m - 1.3) / 0.8) ** 2) * (0.5 + 0.5 * min(1.5, ce_s / max(0.2, ce_m)))
-    return ce_score * ret_sim
+    ret_score = float(metrics.get("retain_score", metrics.get("retain_kl_similarity", 1.0)))
+    ret_acc = float(metrics.get("retain_acc_sub", 1.0))
+    act_ret = float(metrics.get("active45_retain_score", ret_score))
+    eff_retain = 0.65 * ret_score + 0.35 * act_ret
+    gate_mult = 1.0 if ret_acc >= 0.85 else max(0.05, (ret_acc / 0.85) ** 4)
+    mean_term = math.exp(-0.5 * ((ce_m - 1.60) / 0.55) ** 2)
+    std_term = 0.45 + 0.55 * min(1.25, ce_s / max(0.25, 1.70))
+    return mean_term * std_term * eff_retain * gate_mult
 
 
 def main() -> None:
@@ -127,6 +136,8 @@ def main() -> None:
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--retain", type=Path, default=None, help="Optional extra retain_fit.npy proxy")
     parser.add_argument("--retain-audit", type=Path, default=None, help="Optional retain_audit.npy")
+    parser.add_argument("--retain-audit-active", type=Path, default=None)
+    parser.add_argument("--retain-audit-inactive", type=Path, default=None)
     parser.add_argument("--oracle", type=Path, default=None, help="Optional oracle_targets.pt")
     parser.add_argument("--shadow-gold", type=Path, default=None, help="Optional shadow_gold.pt")
     parser.add_argument("--merge-method", choices=["sum", "mean", "ties", "fisher"], default="ties")
@@ -154,6 +165,15 @@ def main() -> None:
     )
     extra_retain = load_images_uint8(args.retain) if args.retain is not None else None
     retain_audit = load_images_uint8(args.retain_audit) if args.retain_audit is not None else None
+    active_path = args.retain_audit_active
+    inactive_path = args.retain_audit_inactive
+    if args.retain_audit is not None:
+        if active_path is None and (args.retain_audit.parent / "retain_audit_active.npy").is_file():
+            active_path = args.retain_audit.parent / "retain_audit_active.npy"
+        if inactive_path is None and (args.retain_audit.parent / "retain_audit_inactive.npy").is_file():
+            inactive_path = args.retain_audit.parent / "retain_audit_inactive.npy"
+    retain_audit_active = load_images_uint8(active_path) if active_path is not None else None
+    retain_audit_inactive = load_images_uint8(inactive_path) if inactive_path is not None else None
 
     if oracle_data is not None and "y_orig" in oracle_data:
         y_all = oracle_data["y_orig"].long().cpu()
@@ -161,6 +181,8 @@ def main() -> None:
     else:
         _, z0 = extract_features_and_logits(teacher, forget_imgs, device=device, batch_size=args.eval_bs)
         y_all = z0.argmax(dim=1)
+    active_classes = y_all.unique().cpu()
+    head_mask = build_active_head_mask(teacher, active_classes) if config_from_args(args).freeze_inactive_head else None
 
     folds = _stratified_folds(y_all, k_folds=args.folds, seed=args.seed)
     base_cfg = config_from_args(args)
@@ -198,6 +220,9 @@ def main() -> None:
             eval_indices=fold_idx,
             device=device,
             shadow_gold=None,
+            active_classes=active_classes,
+            retain_audit_active=retain_audit_active,
+            retain_audit_inactive=retain_audit_inactive,
         )
         sd_k = {name: val.detach().cpu().float() for name, val in student.state_dict().items()}
         deltas.append(state_dict_delta(sd_k, sd_0))
@@ -302,6 +327,7 @@ def main() -> None:
                 w_feat_retain=base_cfg.w_feat_retain,
                 fisher_retain=polish_fisher,
                 orig_params=orig_allowed,
+                head_mask=head_mask,
             )
 
         ev = evaluate_unlearning(
@@ -315,6 +341,8 @@ def main() -> None:
             device=device,
             eval_bs=args.eval_bs,
             shadow_gold=shadow_gold,
+            retain_audit_active=retain_audit_active,
+            retain_audit_inactive=retain_audit_inactive,
         )
         sel_sc = _selection_score(ev, has_shadow=shadow_gold is not None)
         alpha_results.append({"alpha": alpha, "selection_score": sel_sc, **ev})

@@ -8,11 +8,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from hybrid_unlearn import HybridUnlearnConfig, run_hybrid_unlearning
 from ul.saliency import (
     ActivationSubspaceProjector,
     apply_grad_mask,
     apply_magnitude_pruning,
     apply_ssd_dampening,
+    build_active_head_mask,
     build_salun_mask,
     classify_vit_param,
     compute_diagonal_fisher,
@@ -150,3 +152,50 @@ def test_orthogonal_gradient_projection(tiny_model) -> None:
         assert grad is not None
         residual = (grad @ v).norm().item()
         assert residual < 1e-4
+
+
+def test_build_active_head_mask_freezes_inactive_classes(tiny_model) -> None:
+    active = [1, 3, 7]
+    mask = build_active_head_mask(tiny_model, active)
+    assert set(mask.keys()) == {"head.weight", "head.bias"}
+    inactive = [c for c in range(10) if c not in active]
+    assert torch.all(mask["head.weight"][inactive] == 0.0)
+    assert torch.all(mask["head.weight"][active] == 1.0)
+    assert torch.all(mask["head.bias"][inactive] == 0.0)
+    assert torch.all(mask["head.bias"][active] == 1.0)
+
+    teacher = copy.deepcopy(tiny_model).eval()
+    student = copy.deepcopy(tiny_model)
+    w0 = teacher.head.weight.detach().clone()
+    b0 = teacher.head.bias.detach().clone()
+
+    torch.manual_seed(9)
+    forget_imgs = torch.randint(0, 256, (12, 32, 32, 3), dtype=torch.uint8)
+    retain_imgs = torch.randint(0, 256, (12, 32, 32, 3), dtype=torch.uint8)
+    cfg = HybridUnlearnConfig(
+        epochs=2,
+        bs=6,
+        eval_bs=12,
+        lr=1e-2,
+        head_lr_scale=1.0,
+        scope="head_only",
+        include_norm=False,
+        freeze_inactive_head=True,
+        amp="fp32",
+        w_retain=0.0,
+        w_feat_retain=0.0,
+        w_ewc=0.0,
+        polish_epochs=0,
+    )
+    trained, _ = run_hybrid_unlearning(
+        cfg=cfg,
+        teacher=teacher,
+        student=student,
+        forget_imgs=forget_imgs,
+        retain_fit=retain_imgs,
+        active_classes=torch.tensor(active, dtype=torch.long),
+        device="cpu",
+    )
+    torch.testing.assert_close(trained.head.weight[inactive], w0[inactive], atol=0.0, rtol=0.0)
+    torch.testing.assert_close(trained.head.bias[inactive], b0[inactive], atol=0.0, rtol=0.0)
+    assert (trained.head.weight[active] - w0[active]).abs().max().item() > 1e-5

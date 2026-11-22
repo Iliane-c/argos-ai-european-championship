@@ -56,6 +56,7 @@ for b in range(0, len(jobs), args.batch):
         labels[b + j] = chunk[j][0]
     if b % (args.batch * 25) == 0:
         print(f"{b}/{len(jobs)}", flush=True)
+args.out.parent.mkdir(parents=True, exist_ok=True)
 np.save(args.out, out)
 np.save(args.out.with_suffix(".labels.npy"), labels)
 print("saved", args.out, out.shape)

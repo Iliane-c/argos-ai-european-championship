@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -89,6 +90,10 @@ def test_full_pipeline_end_to_end(synthetic_task_env: dict[str, Path], tmp_path:
     retain_fit = ret_dir / "retain_fit.npy"
     retain_audit = ret_dir / "retain_audit.npy"
     assert retain_fit.is_file() and retain_audit.is_file()
+    assert (ret_dir / "retain_audit_active.npy").is_file()
+    assert (ret_dir / "retain_audit_inactive.npy").is_file()
+    ret_meta = json.loads((ret_dir / "retain_meta.json").read_text())
+    assert "active_forget_classes" in ret_meta and len(ret_meta["active_forget_classes"]) > 0
 
     # 3. train_shadow_gold.py
     sg_path = work / "shadow_gold.pt"
@@ -233,6 +238,8 @@ def test_full_pipeline_end_to_end(synthetic_task_env: dict[str, Path], tmp_path:
             "--models", str(branch_full), str(branch_lora), str(kfold_ckpt),
             "--search-weights",
             "--search-gammas",
+            "--max-head-gamma", "1.0",
+            "--export-gamma-sweep", "1.0,1.2",
             "--retain-audit", str(retain_audit),
             "--shadow-gold", str(sg_path),
             "--eval-batch-size", "16",
@@ -243,14 +250,72 @@ def test_full_pipeline_end_to_end(synthetic_task_env: dict[str, Path], tmp_path:
         cwd=tmp_path,
     )
     _assert_valid_checkpoint(soup_ckpt, model_path, task_dir)
+    _assert_valid_checkpoint(work / "final_soup_uniform_g1.00.pt", model_path, task_dir)
+    _assert_valid_checkpoint(work / "final_soup_uniform_g1.20.pt", model_path, task_dir)
     soup_meta = json.loads(soup_json.read_text())
     assert "final_score" in soup_meta and len(soup_meta["soup_weights"]) == 3
+    assert len(soup_meta["individual_candidates"]) == 3
+    assert len(soup_meta["uniform_gamma_sweep"]) == 2
+    assert soup_meta["group_gammas"].get("head", 1.0) <= 1.0
 
 
-def test_slurm_scripts_shell_syntax() -> None:
+def test_slurm_and_pipeline_scripts_shell_syntax() -> None:
     jobs_dir = UNLEARNING_DIR / "jobs"
-    scripts = sorted(jobs_dir.glob("*.sh"))
-    assert len(scripts) == 7
+    scripts = [*sorted(jobs_dir.glob("*.sh")), UNLEARNING_DIR / "run_pipeline.sh", UNLEARNING_DIR / "ssh_t3011.sh"]
+    assert len(scripts) == 9
     for script in scripts:
         res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, check=False)
         assert res.returncode == 0, f"bash -n failed on {script}:\n{res.stderr}"
+
+
+def test_colab_notebook_valid() -> None:
+    nb_path = UNLEARNING_DIR / "colab_hybrid_v2.ipynb"
+    assert nb_path.is_file()
+    raw = nb_path.read_text()
+    for secret_marker in ("ghp_", "github_pat_", "AIza", "YOUR_API_KEY_HERE"):
+        assert secret_marker not in raw
+    nb = json.loads(raw)
+    assert nb["nbformat"] == 4
+    assert len(nb["cells"]) >= 8
+    code_cells = [c for c in nb["cells"] if c.get("cell_type") == "code"]
+    assert len(code_cells) >= 7
+    for idx, cell in enumerate(code_cells):
+        src = "".join(cell["source"])
+        py_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith(("!", "%"))]
+        ast.parse("\n".join(py_lines), filename=f"colab_cell_{idx}")
+
+
+def test_run_pipeline_smoke_cpu(synthetic_task_env: dict[str, Path], tmp_path: Path) -> None:
+    out_dir = tmp_path / "smoke_out"
+    env = os.environ.copy()
+    env.update(
+        {
+            "TMPDIR": "/tmp",
+            "TASK_DIR": str(synthetic_task_env["task_dir"]),
+            "OUT_DIR": str(out_dir),
+            "POOL_PATH": str(synthetic_task_env["pool_path"]),
+            "MODE": "smoke",
+            "SKIP_SHADOW": "1",
+            "AUTO_DOWNLOAD_COCO": "0",
+            "PYTHON_BIN": sys.executable,
+            "DEVICE": "cpu",
+            "AMP": "fp32",
+            "EXPORT_GAMMA_SWEEP": "1.0,1.2",
+        }
+    )
+    res = subprocess.run(
+        ["bash", str(UNLEARNING_DIR / "run_pipeline.sh")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"run_pipeline.sh smoke failed:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+    soup_ckpt = out_dir / "final" / "soup_submission.pt"
+    soup_json = out_dir / "final" / "soup_metrics.json"
+    assert soup_ckpt.is_file() and soup_json.is_file()
+    _assert_valid_checkpoint(soup_ckpt, synthetic_task_env["model_path"], synthetic_task_env["task_dir"])
+    meta = json.loads(soup_json.read_text())
+    assert len(meta["individual_candidates"]) == 5
+    assert len(meta["uniform_gamma_sweep"]) == 2

@@ -224,6 +224,40 @@ def build_salun_mask(
     return {name: (val > threshold).float() for name, val in scores.items()}
 
 
+def build_active_head_mask(
+    model: nn.Module,
+    active_classes: torch.Tensor | Sequence[int],
+) -> dict[str, torch.Tensor]:
+    """Build CPU float32 gradient masks that keep only active_classes rows of head trainable."""
+    active_list = (
+        [int(c) for c in active_classes.detach().cpu().tolist()]
+        if isinstance(active_classes, torch.Tensor)
+        else [int(c) for c in active_classes]
+    )
+    if not active_list:
+        raise ValueError("active_classes must be non-empty")
+
+    masks: dict[str, torch.Tensor] = {}
+    for name, param in model.named_parameters():
+        if name == "head.weight" and param.ndim == 2:
+            num_classes = int(param.shape[0])
+            for c in active_list:
+                if c < 0 or c >= num_classes:
+                    raise ValueError(f"active class index {c} out of bounds for [0, {num_classes})")
+            mask = torch.zeros_like(param, device="cpu", dtype=torch.float32)
+            mask[active_list, :] = 1.0
+            masks[name] = mask
+        elif name == "head.bias" and param.ndim == 1:
+            num_classes = int(param.shape[0])
+            for c in active_list:
+                if c < 0 or c >= num_classes:
+                    raise ValueError(f"active class index {c} out of bounds for [0, {num_classes})")
+            mask = torch.zeros_like(param, device="cpu", dtype=torch.float32)
+            mask[active_list] = 1.0
+            masks[name] = mask
+    return masks
+
+
 def apply_grad_mask(model: nn.Module, mask: Mapping[str, torch.Tensor]) -> None:
     """Zero out non-salient parameter gradients in-place before optimizer.step()."""
     for name, param in model.named_parameters():

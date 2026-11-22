@@ -17,6 +17,7 @@ from ul.merging import (
 from ul.oracle import (
     build_hybrid_gold_targets,
     compute_class_confusion_prior,
+    compute_margin_power_deltas,
     compute_memorization_scores,
     compute_oof_embedding_oracle,
 )
@@ -117,3 +118,57 @@ def test_task_vector_merging_and_layerwise_soup(tiny_model) -> None:
     torch.testing.assert_close(souped["head.weight"], sd_0["head.weight"], atol=1e-7, rtol=1e-7)
     delta_back = state_dict_delta(souped, sd_0)
     assert delta_back["blocks.3.mlp.fc1.weight"].mean().item() == pytest.approx(0.15, abs=1e-5)
+
+
+def test_margin_power_deltas_and_fragility_boost() -> None:
+    num_classes = 10
+    labels = torch.tensor([0, 1, 2, 3, 4], dtype=torch.long)
+    margins = torch.tensor([2.0, 7.5, 10.0, 15.0, 22.0], dtype=torch.float32)
+    z_clean = torch.zeros(len(labels), num_classes, dtype=torch.float32)
+    z_clean.scatter_(1, labels[:, None], margins[:, None])
+
+    deltas_plain = compute_margin_power_deltas(
+        z_teacher_clean=z_clean,
+        y_all=labels,
+        mem_scores=None,
+        base_delta=12.0,
+        margin_power=-2.0,
+        fragility_boost=0.0,
+        delta_clamp_min=2.0,
+        delta_clamp_max=36.0,
+    )
+    assert deltas_plain.shape == (5,)
+    assert torch.all(deltas_plain[:-1] >= deltas_plain[1:])
+    assert deltas_plain.min().item() >= 2.0
+    assert deltas_plain.max().item() <= 36.0
+    assert deltas_plain[2].item() == pytest.approx(12.0, abs=1e-5)
+
+    mem_scores = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], dtype=torch.float32)
+    deltas_tilted = compute_margin_power_deltas(
+        z_teacher_clean=z_clean,
+        y_all=labels,
+        mem_scores=mem_scores,
+        base_delta=12.0,
+        margin_power=-2.0,
+        fragility_boost=0.25,
+        delta_clamp_min=2.0,
+        delta_clamp_max=36.0,
+    )
+    assert deltas_tilted[2].item() == pytest.approx(12.0, abs=1e-5)
+    assert deltas_tilted[4].item() > deltas_plain[4].item()
+    assert deltas_tilted[1].item() < deltas_plain[1].item()
+
+    targets = build_hybrid_gold_targets(
+        z_teacher_clean=z_clean,
+        y_all=labels,
+        mem_scores=mem_scores,
+        num_classes=num_classes,
+        delta_mode="margin_power",
+        base_delta=12.0,
+        margin_power=-2.0,
+        fragility_boost=0.25,
+        soften=0.0,
+        w_shift=1.0,
+    )
+    torch.testing.assert_close(targets["delta_i"], deltas_tilted, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(targets["target_probs_t2"].sum(dim=1), torch.ones(5), atol=1e-5, rtol=1e-5)

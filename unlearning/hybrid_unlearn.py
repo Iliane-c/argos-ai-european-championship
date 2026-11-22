@@ -22,6 +22,7 @@ from ul import (
     apply_magnitude_pruning,
     apply_ssd_dampening,
     augment_batch,
+    build_active_head_mask,
     build_eval_alterations,
     build_hybrid_gold_targets,
     build_model,
@@ -30,6 +31,7 @@ from ul import (
     compute_competition_score,
     compute_diagonal_fisher,
     compute_forget_score,
+    compute_margin_power_deltas,
     compute_retain_score,
     ewc_fisher_penalty,
     extract_features_and_logits,
@@ -63,11 +65,13 @@ class HybridUnlearnConfig:
     bs: int = 32
     eval_bs: int = 128
     lr: float = 3e-5
+    head_lr_scale: float = 0.5
     weight_decay: float = 0.0
     scope: str = "late_mlp"
     train_blocks: int = 6
     include_head: bool = True
     include_norm: bool = True
+    freeze_inactive_head: bool = True
     grad_checkpointing: bool = True
     amp: str = "bf16"
     seed: int = 0
@@ -90,29 +94,37 @@ class HybridUnlearnConfig:
     ogp_var: float = 0.95
     ogp_samples: int = 512
     # Adaptive targets & loss weights
+    delta_mode: str = "oracle"
     delta: float = 12.0
+    margin_power: float | None = None
+    fragility_boost: float = 0.0
+    delta_clamp_min: float = 2.0
+    delta_clamp_max: float = 36.0
     delta_min: float = 2.0
     delta_max: float = 16.0
-    soften: float = 0.10
-    view_ratio: bool = True
+    soften: float = 0.0
+    view_ratio: bool = False
+    clean_target_blend: float = 0.0
+    target_ce_mean: float | None = None
+    target_ce_std: float | None = None
     w_kd_t2: float = 1.0
-    w_kd_t1: float = 0.35
-    w_moment: float = 0.25
+    w_kd_t1: float = 1.0
+    w_moment: float = 0.0
     moment_mode: str = "mean_std"
     moment_bank_size: int = 512
-    w_npo: float = 0.15
+    w_npo: float = 0.0
     npo_beta: float = 0.2
-    npo_min_mem: float = 0.65
-    w_smooth: float = 0.25
+    npo_min_mem: float = 0.70
+    w_smooth: float = 0.0
     w_scar: float = 0.0
     scar_margin: float = 1.0
-    w_retain: float = 1.5
-    w_feat_retain: float = 0.5
+    w_retain: float = 1.0
+    w_feat_retain: float = 0.10
     w_head_gaussian: float = 0.0
-    w_ewc: float = 1.0
+    w_ewc: float = 0.0
     # Curriculum & SCRUB polish
     rum_curriculum: bool = False
-    polish_epochs: int = 1
+    polish_epochs: int = 0
     polish_lr: float = 5e-6
 
 
@@ -141,6 +153,8 @@ def evaluate_unlearning(
     device: str,
     eval_bs: int = 128,
     shadow_gold: dict | None = None,
+    retain_audit_active: torch.Tensor | None = None,
+    retain_audit_inactive: torch.Tensor | None = None,
 ) -> dict[str, float | bool]:
     """Evaluate clean forget, altered forget, retain audit, and optional Shadow-Gold score."""
     ev_imgs = forget_imgs[eval_indices.cpu()]
@@ -180,6 +194,15 @@ def evaluate_unlearning(
         r_sub = predict_logits(student, retain_audit, device=device, batch_size=eval_bs)
         retain_metrics = compute_retain_score(r_orig, r_sub, labels_ctrl=None, temperature=2.0)
         metrics.update(retain_metrics)
+
+    for split_prefix, split_imgs in (("active45", retain_audit_active), ("inactive55", retain_audit_inactive)):
+        if split_imgs is not None and len(split_imgs) > 0:
+            s_orig = predict_logits(teacher, split_imgs, device=device, batch_size=eval_bs)
+            s_sub = predict_logits(student, split_imgs, device=device, batch_size=eval_bs)
+            sm = compute_retain_score(s_orig, s_sub, labels_ctrl=None, temperature=2.0)
+            metrics[f"{split_prefix}_retain_score"] = sm["retain_score"]
+            metrics[f"{split_prefix}_retain_acc"] = sm["retain_acc_sub"]
+            metrics[f"{split_prefix}_retain_kl"] = sm["retain_mean_kl"]
 
     if shadow_gold is not None and len(eval_indices) == len(forget_imgs):
         fg_metrics = compute_forget_score(
@@ -226,6 +249,9 @@ def run_hybrid_unlearning(
     shadow_gold: dict | None = None,
     save_epoch_dir: Path | None = None,
     model_factory=None,
+    active_classes: torch.Tensor | None = None,
+    retain_audit_active: torch.Tensor | None = None,
+    retain_audit_inactive: torch.Tensor | None = None,
 ) -> tuple[nn.Module, dict]:
     """Execute the full hybrid unlearning pipeline on student starting from teacher."""
     torch.manual_seed(cfg.seed)
@@ -280,6 +306,25 @@ def run_hybrid_unlearning(
         target_ce_std = float(built["target_ce_std"])
         target_sorted_ce = built["target_sorted_ce"]
         class_means, class_inv_vars = compute_class_feature_stats(feats0, y_all, num_classes=num_classes)
+
+    if cfg.margin_power is not None or cfg.delta_mode == "margin_power":
+        eff_mp = float(cfg.margin_power) if cfg.margin_power is not None else -2.2
+        delta_i = compute_margin_power_deltas(
+            z_teacher_clean=z0,
+            y_all=y_all,
+            mem_scores=mem_scores,
+            base_delta=cfg.delta,
+            margin_power=eff_mp,
+            fragility_boost=cfg.fragility_boost,
+            delta_clamp_min=cfg.delta_clamp_min,
+            delta_clamp_max=cfg.delta_clamp_max,
+        )
+    if cfg.target_ce_mean is not None:
+        target_ce_mean = float(cfg.target_ce_mean)
+    if cfg.target_ce_std is not None:
+        target_ce_std = float(cfg.target_ce_std)
+
+    resolved_active_classes = active_classes.long().cpu() if active_classes is not None else y_all.unique().cpu()
 
     # Select surgical trainable subset BEFORE optional Fisher / SSD / pruning / LoRA
     trainable_names = select_trainable_params(
@@ -428,8 +473,16 @@ def run_hybrid_unlearning(
     hard_tr_idx = tr_idx[hard_mask] if hard_mask.any() else tr_idx
 
     moment_criterion = MemoryBankMomentLoss(bank_size=cfg.moment_bank_size).to(device)
-    opt_params = [p for p in student.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(opt_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    head_mask = build_active_head_mask(student, resolved_active_classes) if (cfg.freeze_inactive_head and not has_lora) else None
+    backbone_params = [p for n, p in student.named_parameters() if p.requires_grad and not n.startswith("head.")]
+    head_params = [p for n, p in student.named_parameters() if p.requires_grad and n.startswith("head.")]
+    opt_groups: list[dict] = []
+    if backbone_params:
+        opt_groups.append({"params": backbone_params, "lr": cfg.lr})
+    if head_params:
+        opt_groups.append({"params": head_params, "lr": cfg.lr * cfg.head_lr_scale})
+    opt_params = backbone_params + head_params
+    opt = torch.optim.AdamW(opt_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
 
     steps_per_epoch = max(1, math.ceil(len(tr_idx) / cfg.bs))
@@ -443,11 +496,14 @@ def run_hybrid_unlearning(
     moment_criterion.train()
     t0 = time.time()
     ref_state = {k: v.detach().cpu().float() for k, v in teacher.state_dict().items()}
+    named_params = dict(student.named_parameters())
 
     def _step_optimize(loss: torch.Tensor, optimizer: torch.optim.Optimizer) -> None:
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
+        if head_mask is not None:
+            apply_grad_mask(student, head_mask)
         if salun_mask is not None:
             apply_grad_mask(student, salun_mask)
         if ogp is not None:
@@ -455,6 +511,13 @@ def run_hybrid_unlearning(
         torch.nn.utils.clip_grad_norm_(opt_params, 1.0)
         scaler.step(optimizer)
         scaler.update()
+        if head_mask is not None and cfg.weight_decay > 0.0:
+            with torch.no_grad():
+                for name, mask in head_mask.items():
+                    if name in orig_params and name in named_params:
+                        p = named_params[name]
+                        keep = mask.to(device=p.device, dtype=torch.bool)
+                        p.data.copy_(torch.where(keep, p.data, orig_params[name].to(device=p.device, dtype=p.dtype)))
 
     for step in range(total_steps):
         if cfg.rum_curriculum and step < int(0.30 * total_steps):
@@ -467,7 +530,16 @@ def run_hybrid_unlearning(
         r_pick = torch.randint(len(retain_fit), (cfg.bs,))
 
         f01 = to_float01(forget_imgs[pick], device)
-        v_aug = normalize_images(augment_batch(f01, clean_prob=0.25 if cfg.w_smooth == 0.0 else 0.0, patch_size=patch_size))
+        v_aug = normalize_images(
+            augment_batch(
+                f01,
+                clean_prob=0.25,
+                crop_scale=(0.75, 1.0),
+                max_rot_deg=10.0,
+                erase_prob=0.15,
+                patch_size=patch_size,
+            )
+        )
         r_aug = normalize_images(augment_batch(to_float01(retain_fit[r_pick], device), clean_prob=0.25, patch_size=patch_size))
 
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=str(device).startswith("cuda")):
@@ -485,8 +557,11 @@ def run_hybrid_unlearning(
         if cfg.soften > 0.0:
             q_view_t2 = (1.0 - cfg.soften) * q_view_t2 + cfg.soften * prior_dev[y_b]
             q_view_t1 = (1.0 - cfg.soften) * q_view_t1 + cfg.soften * prior_dev[y_b]
-        # Anchor half to the view-shifted logit target and half to the calibrated clean oracle target
-        q_t2 = 0.5 * q_view_t2 + 0.5 * target_t2_dev[pick_dev]
+        if cfg.clean_target_blend > 0.0:
+            blend = float(cfg.clean_target_blend)
+            q_t2 = (1.0 - blend) * q_view_t2 + blend * target_t2_dev[pick_dev]
+        else:
+            q_t2 = q_view_t2
 
         with torch.autocast("cuda", dtype=amp_dtype or torch.float32, enabled=amp_dtype is not None):
             cat_in = torch.cat([v_aug, r_aug], dim=0)
@@ -547,7 +622,12 @@ def run_hybrid_unlearning(
     # SCRUB retain-only polish phase to minimize control KL drift without touching forget images
     if cfg.polish_epochs > 0:
         polish_steps = max(1, cfg.polish_epochs * math.ceil(len(retain_fit) / cfg.bs))
-        polish_opt = torch.optim.AdamW(opt_params, lr=cfg.polish_lr, weight_decay=0.0)
+        polish_groups: list[dict] = []
+        if backbone_params:
+            polish_groups.append({"params": backbone_params, "lr": cfg.polish_lr})
+        if head_params:
+            polish_groups.append({"params": head_params, "lr": cfg.polish_lr * cfg.head_lr_scale})
+        polish_opt = torch.optim.AdamW(polish_groups, lr=cfg.polish_lr, weight_decay=0.0)
         polish_sched = torch.optim.lr_scheduler.CosineAnnealingLR(polish_opt, T_max=polish_steps)
         print(f"Running {cfg.polish_epochs} SCRUB retain-polish epoch(s) ({polish_steps} steps, lr={cfg.polish_lr})")
         for p_step in range(polish_steps):
@@ -584,6 +664,8 @@ def run_hybrid_unlearning(
         device=device,
         eval_bs=cfg.eval_bs,
         shadow_gold=shadow_gold,
+        retain_audit_active=retain_audit_active,
+        retain_audit_inactive=retain_audit_inactive,
     )
     metrics["trainable_param_tensors"] = len(trainable_names)
     metrics["warmstart"] = warmstart_info
@@ -599,6 +681,7 @@ def add_hybrid_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bs", type=int, default=32)
     parser.add_argument("--eval-bs", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-5)
+    parser.add_argument("--head-lr-scale", type=float, default=0.5)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument(
         "--scope",
@@ -608,6 +691,7 @@ def add_hybrid_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--train-blocks", type=int, default=6)
     parser.add_argument("--no-head", action="store_true")
     parser.add_argument("--no-norm", action="store_true")
+    parser.add_argument("--no-freeze-inactive-head", action="store_true")
     parser.add_argument("--no-grad-checkpointing", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     # Warm-starts
@@ -628,28 +712,38 @@ def add_hybrid_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ogp-var", type=float, default=0.95)
     parser.add_argument("--ogp-samples", type=int, default=512)
     # Loss weights
+    parser.add_argument("--delta-mode", choices=["oracle", "margin_power"], default="oracle")
     parser.add_argument("--delta", type=float, default=12.0)
+    parser.add_argument("--margin-power", type=float, default=None)
+    parser.add_argument("--fragility-boost", type=float, default=0.0)
+    parser.add_argument("--delta-clamp-min", type=float, default=2.0)
+    parser.add_argument("--delta-clamp-max", type=float, default=36.0)
     parser.add_argument("--delta-min", type=float, default=2.0)
     parser.add_argument("--delta-max", type=float, default=16.0)
-    parser.add_argument("--soften", type=float, default=0.10)
-    parser.add_argument("--no-view-ratio", action="store_true")
+    parser.add_argument("--soften", type=float, default=0.0)
+    parser.add_argument("--view-ratio", dest="view_ratio", action="store_true")
+    parser.add_argument("--no-view-ratio", dest="view_ratio", action="store_false")
+    parser.set_defaults(view_ratio=False)
+    parser.add_argument("--clean-target-blend", type=float, default=0.0)
+    parser.add_argument("--target-ce-mean", type=float, default=None)
+    parser.add_argument("--target-ce-std", type=float, default=None)
     parser.add_argument("--w-kd-t2", type=float, default=1.0)
-    parser.add_argument("--w-kd-t1", type=float, default=0.35)
-    parser.add_argument("--w-moment", type=float, default=0.25)
+    parser.add_argument("--w-kd-t1", type=float, default=1.0)
+    parser.add_argument("--w-moment", type=float, default=0.0)
     parser.add_argument("--moment-mode", choices=["mean_std", "wasserstein"], default="mean_std")
     parser.add_argument("--moment-bank-size", type=int, default=512)
-    parser.add_argument("--w-npo", type=float, default=0.15)
+    parser.add_argument("--w-npo", type=float, default=0.0)
     parser.add_argument("--npo-beta", type=float, default=0.2)
-    parser.add_argument("--npo-min-mem", type=float, default=0.65)
-    parser.add_argument("--w-smooth", type=float, default=0.25)
+    parser.add_argument("--npo-min-mem", type=float, default=0.70)
+    parser.add_argument("--w-smooth", type=float, default=0.0)
     parser.add_argument("--w-scar", type=float, default=0.0)
     parser.add_argument("--scar-margin", type=float, default=1.0)
-    parser.add_argument("--w-retain", type=float, default=1.5)
-    parser.add_argument("--w-feat-retain", type=float, default=0.5)
+    parser.add_argument("--w-retain", type=float, default=1.0)
+    parser.add_argument("--w-feat-retain", type=float, default=0.10)
     parser.add_argument("--w-head-gaussian", type=float, default=0.0)
-    parser.add_argument("--w-ewc", type=float, default=1.0)
+    parser.add_argument("--w-ewc", type=float, default=0.0)
     parser.add_argument("--rum-curriculum", action="store_true")
-    parser.add_argument("--polish-epochs", type=int, default=1)
+    parser.add_argument("--polish-epochs", type=int, default=0)
     parser.add_argument("--polish-lr", type=float, default=5e-6)
 
 
@@ -659,11 +753,13 @@ def config_from_args(args: argparse.Namespace) -> HybridUnlearnConfig:
         bs=args.bs,
         eval_bs=args.eval_bs,
         lr=args.lr,
+        head_lr_scale=args.head_lr_scale,
         weight_decay=args.weight_decay,
         scope=args.scope,
         train_blocks=args.train_blocks,
         include_head=not args.no_head,
         include_norm=not args.no_norm,
+        freeze_inactive_head=not args.no_freeze_inactive_head,
         grad_checkpointing=not args.no_grad_checkpointing,
         amp=args.amp,
         seed=args.seed,
@@ -682,11 +778,19 @@ def config_from_args(args: argparse.Namespace) -> HybridUnlearnConfig:
         ogp_rank=args.ogp_rank,
         ogp_var=args.ogp_var,
         ogp_samples=args.ogp_samples,
+        delta_mode=args.delta_mode,
         delta=args.delta,
+        margin_power=args.margin_power,
+        fragility_boost=args.fragility_boost,
+        delta_clamp_min=args.delta_clamp_min,
+        delta_clamp_max=args.delta_clamp_max,
         delta_min=args.delta_min,
         delta_max=args.delta_max,
         soften=args.soften,
-        view_ratio=not args.no_view_ratio,
+        view_ratio=args.view_ratio,
+        clean_target_blend=args.clean_target_blend,
+        target_ce_mean=args.target_ce_mean,
+        target_ce_std=args.target_ce_std,
         w_kd_t2=args.w_kd_t2,
         w_kd_t1=args.w_kd_t1,
         w_moment=args.w_moment,
@@ -713,6 +817,8 @@ def main() -> None:
     add_common_io_args(parser)
     parser.add_argument("--retain", type=Path, required=True, help="uint8 .npy/.npz retain proxy images")
     parser.add_argument("--retain-audit", type=Path, default=None, help="Optional uint8 retain audit images")
+    parser.add_argument("--retain-audit-active", type=Path, default=None)
+    parser.add_argument("--retain-audit-inactive", type=Path, default=None)
     parser.add_argument("--retain-audit-count", type=int, default=500, help="Used if --retain-audit is omitted")
     parser.add_argument("--oracle", type=Path, default=None, help="Optional oracle_targets.pt")
     parser.add_argument("--shadow-gold", type=Path, default=None, help="Optional shadow_gold.pt")
@@ -738,6 +844,16 @@ def main() -> None:
         retain_fit = retain_all
         retain_audit = None
 
+    active_path = args.retain_audit_active
+    inactive_path = args.retain_audit_inactive
+    if args.retain_audit is not None:
+        if active_path is None and (args.retain_audit.parent / "retain_audit_active.npy").is_file():
+            active_path = args.retain_audit.parent / "retain_audit_active.npy"
+        if inactive_path is None and (args.retain_audit.parent / "retain_audit_inactive.npy").is_file():
+            inactive_path = args.retain_audit.parent / "retain_audit_inactive.npy"
+    retain_audit_active = load_images_uint8(active_path) if active_path is not None else None
+    retain_audit_inactive = load_images_uint8(inactive_path) if inactive_path is not None else None
+
     oracle_data = torch.load(args.oracle, map_location="cpu", weights_only=True) if args.oracle is not None else None
     shadow_gold = (
         torch.load(args.shadow_gold, map_location="cpu", weights_only=True) if args.shadow_gold is not None else None
@@ -760,6 +876,8 @@ def main() -> None:
         shadow_gold=shadow_gold,
         save_epoch_dir=save_epoch_dir,
         model_factory=factory,
+        retain_audit_active=retain_audit_active,
+        retain_audit_inactive=retain_audit_inactive,
     )
 
     ref_state = {k: v.detach().cpu().float() for k, v in teacher.state_dict().items()}

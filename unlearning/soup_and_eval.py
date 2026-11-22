@@ -14,7 +14,9 @@ from hybrid_unlearn import evaluate_unlearning
 from ul import (
     add_common_io_args,
     build_model,
+    classify_vit_param,
     compute_retain_score,
+    infer_vit_depth,
     infer_vit_dims,
     layerwise_interpolate,
     load_images_uint8,
@@ -28,14 +30,25 @@ from ul import (
 )
 
 
-def _score_metrics(metrics: dict[str, float | bool], has_shadow: bool) -> float:
+def _score_metrics(
+    metrics: dict[str, float | bool],
+    has_shadow: bool,
+    target_ce_mean: float = 1.60,
+    target_ce_std: float = 1.70,
+    min_retain_acc: float = 0.85,
+) -> float:
     if has_shadow and "final_score" in metrics:
         return float(metrics["final_score"])
     ce_m = float(metrics["forget_clean_ce_mean"])
     ce_s = float(metrics["forget_clean_ce_std"])
-    ret_sim = float(metrics.get("retain_kl_similarity", 1.0))
-    ce_score = math.exp(-0.5 * ((ce_m - 1.3) / 0.8) ** 2) * (0.5 + 0.5 * min(1.5, ce_s / max(0.2, ce_m)))
-    return ce_score * ret_sim
+    ret_score = float(metrics.get("retain_score", metrics.get("retain_kl_similarity", 1.0)))
+    ret_acc = float(metrics.get("retain_acc_sub", 1.0))
+    act_ret = float(metrics.get("active45_retain_score", ret_score))
+    eff_retain = 0.65 * ret_score + 0.35 * act_ret
+    gate_mult = 1.0 if ret_acc >= min_retain_acc else max(0.05, (ret_acc / max(min_retain_acc, 1e-6)) ** 4)
+    mean_term = math.exp(-0.5 * ((ce_m - target_ce_mean) / 0.55) ** 2)
+    std_term = 0.45 + 0.55 * min(1.25, ce_s / max(0.25, target_ce_std))
+    return mean_term * std_term * eff_retain * gate_mult
 
 
 def _candidate_weight_vectors(num_models: int, seed: int = 0) -> list[list[float]]:
@@ -51,7 +64,7 @@ def _candidate_weight_vectors(num_models: int, seed: int = 0) -> list[list[float
             vecs.append([w0, 1.0 - w0])
     else:
         gen = torch.Generator().manual_seed(seed)
-        for _ in range(8):
+        for _ in range(12):
             raw = torch.rand(num_models, generator=gen)
             raw = raw / raw.sum()
             vecs.append([float(x) for x in raw.tolist()])
@@ -68,9 +81,17 @@ def main() -> None:
     parser.add_argument("--search-weights", action="store_true")
     parser.add_argument("--search-gammas", action="store_true")
     parser.add_argument("--retain-audit", type=Path, default=None)
+    parser.add_argument("--retain-audit-active", type=Path, default=None)
+    parser.add_argument("--retain-audit-inactive", type=Path, default=None)
     parser.add_argument("--shadow-gold", type=Path, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=128)
     parser.add_argument("--search-subset", type=int, default=512, help="Max forget images used during fast weight/gamma search")
+    parser.add_argument("--target-ce-mean", type=float, default=1.60)
+    parser.add_argument("--target-ce-std", type=float, default=1.70)
+    parser.add_argument("--min-retain-acc", type=float, default=0.85)
+    parser.add_argument("--max-head-gamma", type=float, default=1.0)
+    parser.add_argument("--max-gamma", type=float, default=1.8)
+    parser.add_argument("--export-gamma-sweep", type=str, default="", help="Optional uniform gamma list e.g. 1.0,1.2,1.35,1.5")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--metrics-out", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=0)
@@ -83,9 +104,19 @@ def main() -> None:
     forget_imgs = load_images_uint8(forget_path)
     num_classes, img_size, _ = infer_vit_dims(teacher, forget_imgs)
     sd_0 = {k: v.detach().cpu().float().clone() for k, v in teacher.state_dict().items()}
+    depth = infer_vit_depth(sd_0.keys())
 
     cand_sds = [torch.load(p, map_location="cpu", weights_only=True) for p in args.models]
     retain_audit = load_images_uint8(args.retain_audit) if args.retain_audit is not None else None
+    active_path = args.retain_audit_active
+    inactive_path = args.retain_audit_inactive
+    if args.retain_audit is not None:
+        if active_path is None and (args.retain_audit.parent / "retain_audit_active.npy").is_file():
+            active_path = args.retain_audit.parent / "retain_audit_active.npy"
+        if inactive_path is None and (args.retain_audit.parent / "retain_audit_inactive.npy").is_file():
+            inactive_path = args.retain_audit.parent / "retain_audit_inactive.npy"
+    retain_audit_active = load_images_uint8(active_path) if active_path is not None else None
+    retain_audit_inactive = load_images_uint8(inactive_path) if inactive_path is not None else None
     shadow_gold = (
         torch.load(args.shadow_gold, map_location="cpu", weights_only=True) if args.shadow_gold is not None else None
     )
@@ -96,6 +127,11 @@ def main() -> None:
     r_orig = (
         predict_logits(teacher, retain_audit, device=device, batch_size=args.eval_batch_size)
         if retain_audit is not None and len(retain_audit) > 0
+        else None
+    )
+    r_orig_active = (
+        predict_logits(teacher, retain_audit_active, device=device, batch_size=args.eval_batch_size)
+        if retain_audit_active is not None and len(retain_audit_active) > 0
         else None
     )
     eval_model = build_model(num_classes=num_classes, task_dir=task_dir).to(device).eval()
@@ -123,6 +159,12 @@ def main() -> None:
         if retain_audit is not None and r_orig is not None:
             r_sub = predict_logits(eval_model, retain_audit, device=device, batch_size=args.eval_batch_size)
             m.update(compute_retain_score(r_orig, r_sub, labels_ctrl=None, temperature=2.0))
+        if retain_audit_active is not None and r_orig_active is not None:
+            ra_sub = predict_logits(eval_model, retain_audit_active, device=device, batch_size=args.eval_batch_size)
+            ra_m = compute_retain_score(r_orig_active, ra_sub, labels_ctrl=None, temperature=2.0)
+            m["active45_retain_score"] = ra_m["retain_score"]
+            m["active45_retain_acc"] = ra_m["retain_acc_sub"]
+            m["active45_retain_kl"] = ra_m["retain_mean_kl"]
         return m
 
     def _eval_sd(sd: dict[str, torch.Tensor]) -> dict[str, float | bool]:
@@ -138,7 +180,23 @@ def main() -> None:
             device=device,
             eval_bs=args.eval_batch_size,
             shadow_gold=shadow_gold,
+            retain_audit_active=retain_audit_active,
+            retain_audit_inactive=retain_audit_inactive,
         )
+
+    def _score(m: dict[str, float | bool]) -> float:
+        return _score_metrics(
+            m,
+            has_shadow=shadow_gold is not None,
+            target_ce_mean=args.target_ce_mean,
+            target_ce_std=args.target_ce_std,
+            min_retain_acc=args.min_retain_acc,
+        )
+
+    individual_candidates: list[dict] = []
+    for path, sd in zip(args.models, cand_sds):
+        m_ind = _eval_fast(sd)
+        individual_candidates.append({"model": str(path), "proxy_score": _score(m_ind), **m_ind})
 
     if args.weights:
         weights = [float(x.strip()) for x in args.weights.split(",") if x.strip()]
@@ -146,6 +204,8 @@ def main() -> None:
         weights = [1.0 / len(cand_sds)] * len(cand_sds)
 
     group_gammas = parse_group_gammas(args.group_gammas)
+    if "head" not in group_gammas and args.max_head_gamma < args.default_gamma:
+        group_gammas["head"] = args.max_head_gamma
 
     if args.search_weights and len(cand_sds) > 1:
         best_w = weights
@@ -154,14 +214,15 @@ def main() -> None:
         for idx_w, w_vec in enumerate(w_cands, start=1):
             sd_try = soup_checkpoints(sd_0, cand_sds, weights=w_vec, group_gammas=group_gammas, default_gamma=args.default_gamma)
             m_try = _eval_fast(sd_try)
-            sc = _score_metrics(m_try, has_shadow=shadow_gold is not None)
+            sc = _score(m_try)
             del sd_try
             if sc > best_sc:
                 best_sc = sc
                 best_w = w_vec
             if idx_w == 1 or idx_w == len(w_cands) or idx_w % 5 == 0:
                 print(
-                    f"  [weight search {idx_w}/{len(w_cands)}] CE={m_try['forget_clean_ce_mean']:.3f} "
+                    f"  [weight search {idx_w}/{len(w_cands)}] CE={m_try['forget_clean_ce_mean']:.3f}/"
+                    f"{m_try['forget_clean_ce_std']:.3f} ret_acc={m_try.get('retain_acc_sub', 1.0):.3f} "
                     f"ret_kl={m_try.get('retain_mean_kl', 0.0):.4f} best_sc={best_sc:.4f}",
                     flush=True,
                 )
@@ -172,20 +233,42 @@ def main() -> None:
     del cand_sds
 
     if args.search_gammas:
-        search_groups = ("late_mlp", "mid_mlp", "late_attn", "head", "norm")
-        gamma_grid = (0.5, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+        search_groups = (
+            "late_mlp",
+            "mid_mlp",
+            "late_attn",
+            "mid_attn",
+            "early_mlp",
+            "early_attn",
+            "layerscale",
+            "head",
+            "norm",
+        )
+        base_grid = (0.5, 0.8, 1.0, 1.15, 1.3, 1.45, 1.6, 1.8)
         best_gammas = dict(group_gammas)
         best_sd_g = layerwise_interpolate(sd_0, base_soup_sd, best_gammas, default_gamma=args.default_gamma)
-        best_sc = _score_metrics(_eval_fast(best_sd_g), has_shadow=shadow_gold is not None)
+        best_sc = _score(_eval_fast(best_sd_g))
         del best_sd_g
         for grp in search_groups:
-            cur_best_val = best_gammas.get(grp, args.default_gamma)
+            has_delta = any(
+                classify_vit_param(name, depth=depth) == grp
+                and (base_soup_sd[name] - sd_0[name]).abs().max().item() >= 1e-12
+                for name in sd_0
+                if torch.is_floating_point(sd_0[name])
+            )
+            if not has_delta:
+                continue
+            grp_cap = args.max_head_gamma if grp == "head" else (min(1.2, args.max_gamma) if grp == "norm" else args.max_gamma)
+            gamma_grid = [g for g in base_grid if g <= grp_cap + 1e-9]
+            if grp_cap not in gamma_grid and grp_cap >= 0.25:
+                gamma_grid.append(grp_cap)
+            cur_best_val = min(best_gammas.get(grp, args.default_gamma), grp_cap)
             for g in gamma_grid:
                 trial = dict(best_gammas)
                 trial[grp] = g
                 sd_try = layerwise_interpolate(sd_0, base_soup_sd, trial, default_gamma=args.default_gamma)
                 m_try = _eval_fast(sd_try)
-                sc = _score_metrics(m_try, has_shadow=shadow_gold is not None)
+                sc = _score(m_try)
                 del sd_try
                 if sc > best_sc + 1e-6:
                     best_sc = sc
@@ -200,9 +283,10 @@ def main() -> None:
     final_metrics["soup_weights"] = weights
     final_metrics["group_gammas"] = group_gammas
     final_metrics["default_gamma"] = args.default_gamma
+    final_metrics["individual_candidates"] = individual_candidates
 
+    factory = lambda: build_model(num_classes=num_classes, task_dir=task_dir)
     if args.out is not None:
-        factory = lambda: build_model(num_classes=num_classes, task_dir=task_dir)
         size_bytes = validate_and_save_submission(
             final_sd,
             args.out,
@@ -212,6 +296,34 @@ def main() -> None:
         )
         final_metrics["checkpoint"] = str(args.out)
         final_metrics["checkpoint_bytes"] = size_bytes
+
+    if args.export_gamma_sweep.strip():
+        sweep_gammas = [float(x.strip()) for x in args.export_gamma_sweep.split(",") if x.strip()]
+        sweep_records: list[dict] = []
+        for sg in sweep_gammas:
+            sg_gammas = {"head": min(sg, args.max_head_gamma), "norm": min(sg, 1.2)}
+            sd_sw = layerwise_interpolate(sd_0, base_soup_sd, group_gammas=sg_gammas, default_gamma=sg)
+            m_sw = _eval_sd(sd_sw)
+            rec = {"uniform_gamma": sg, "head_gamma": sg_gammas["head"], **m_sw}
+            if args.out is not None:
+                sw_path = args.out.with_name(f"{args.out.stem}_uniform_g{sg:.2f}.pt")
+                validate_and_save_submission(
+                    sd_sw,
+                    sw_path,
+                    reference_state=sd_0,
+                    model_factory=factory,
+                    verify_forward_shape=(1, 3, img_size, img_size),
+                )
+                rec["checkpoint"] = str(sw_path)
+            sweep_records.append(rec)
+            print(
+                f"  [sweep g={sg:.2f}] clean CE={m_sw['forget_clean_ce_mean']:.3f}/"
+                f"{m_sw['forget_clean_ce_std']:.3f} acc={m_sw['forget_clean_acc']:.3f} "
+                f"ret_acc={m_sw.get('retain_acc_sub', float('nan')):.3f} "
+                f"ret_kl={m_sw.get('retain_mean_kl', float('nan')):.4f}",
+                flush=True,
+            )
+        final_metrics["uniform_gamma_sweep"] = sweep_records
 
     if args.metrics_out is not None:
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)

@@ -157,3 +157,25 @@ Modular multi-paradigm unlearning library (`unlearning/ul/`), 7 CLI entrypoints 
   4. `sbatch jobs/03_wave1_kfold_and_salun.sh` — 5-fold cross-fitted TIES task-vector unlearning (`kfold_unlearn.py`) + SalUn late-MLP baseline (`hybrid_unlearn.py`)
   5. `sbatch jobs/04_wave2_hybrid_and_branches.sh` — full hybrid branch, LoRA+OGP branch, and L1-prune+heal branch (`hybrid_unlearn.py`)
   6. `sbatch jobs/05_soup_and_eval.sh` — weight-space soup + coordinate layerwise `γ` search (`soup_and_eval.py`)
+
+### v1 Colab Run & Public Evaluation
+
+Executed `run_pipeline.sh` (`MODE=fast`, `SKIP_SHADOW=1`) on COCO val2017 (`4,591` fit / `400` audit). Because v1's initial oracle had `delta_mean=7.20`, `target_ce_mean=0.220` (`oof_ce_mean=0.072`), and `soften=0.10` / `view_ratio=True` / `w_ewc=1.0`, the branches converged to low forget CE and Stage 6 selected `branch_full_hybrid.pt` extrapolated at `γ=3.0` (including `head=3.0`).
+
+| Submission | Model | Forget clean CE mean/std, acc | Retain proxy (acc, KL@T2, score) | Public score |
+| --- | --- | ---: | ---: | ---: |
+| 2310 | v1 `soup_submission.pt` (`γ=3.0` on `branch_full_hybrid`) | `0.932 / 1.172`, `71.3%` | `72.5%`, `0.246`, `0.582` | `0.0527` |
+
+Diagnostic findings from `diagnostics.json`:
+- LayerScale `ls2.gamma` jumps 8–10× in `blocks.7..11` (`2.01–2.56` vs `0.20–0.76` in `blocks.0..6`).
+- Only `45 / 100` classes appear in `forget_images.npz` (`55` classes have `0` forget images).
+- `patch20` is the main corruption cracking memorization (`86.7%` acc, `CE=0.538±1.637`).
+
+## T3-021 — Hybrid v2 (heavy-tail margin+patch oracle, frozen 55-class head, in-domain 45-class retain, Colab notebook)
+
+Combines the leaderboard-verified findings from `T3-010`/`T3-011` (`margin_power` heavy tail, last-k localization, no `soften`, no `view_ratio`, SDXL-Turbo 45-class anchors) with the `T3-020` modular suite (`ul/`):
+
+- **Surgical 55-class head mask (`ul/saliency.py:build_active_head_mask`)**: zeroes gradients on the `55` non-forget class rows of `head.weight` / `head.bias` throughout training and polish (`freeze_inactive_head=True`, `head_lr_scale=0.5`).
+- **Heavy-tail margin + patch fragility oracle (`ul/oracle.py`, `build_oracle.py`)**: `--delta-mode margin_power` (`base_delta=12.0`, `margin_power=-2.2`, `fragility_boost=0.25` from `rot10`/`patch20`/`patch35`/`blur5` + LOO outlierness + weight/input sensitivity), `--soften 0.0`, `--no-view-ratio`.
+- **Active-45 vs inactive-55 retain audit (`build_retain_proxy.py`, `hybrid_unlearn.py`, `soup_and_eval.py`)**: splits `retain_audit` into `retain_audit_active.npy` (45 forget classes) and `retain_audit_inactive.npy` (55 untouched classes) alongside `gen_indomain.py` + COCO retention.
+- **Calibrated 5-branch pipeline & Stage 6 soup (`run_pipeline.sh`, `soup_and_eval.py`, `colab_hybrid_v2.ipynb`)**: trains `last6_mp22`, `last5_patch_mp25`, `branch_full_mp30`, `branch_hybrid_npo_moment`, and `wave2_kfold` directly to `CE ≈ 1.0–1.5`, soups with `head` capped at `γ ≤ 1.0` (`max_gamma=1.8`), and exports `--export-gamma-sweep 1.0,1.2,1.35,1.5`. Ready-to-run Colab notebook at [`unlearning/colab_hybrid_v2.ipynb`](colab_hybrid_v2.ipynb).

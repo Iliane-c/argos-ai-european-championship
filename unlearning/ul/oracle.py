@@ -96,26 +96,33 @@ def compute_memorization_scores(
         feats_clean = feats_clean.float().cpu()
 
     y_orig = z_clean.argmax(dim=1)
+    zy = z_clean.gather(1, y_orig[:, None]).squeeze(1)
+    m_clean = (zy - z_clean.scatter(1, y_orig[:, None], -1e9).max(dim=1).values).clamp_min(1e-3)
     p_clean = F.softmax(z_clean / 2.0, dim=1)
     p_y_clean = p_clean.gather(1, y_orig[:, None]).squeeze(1)
 
-    # 1. Augmentation & patch-mask fragility
+    # 1. Augmentation & patch-mask fragility (prioritize views that separate memorization)
     eval_views = build_eval_alterations(patch_size=patch_size)
     gen_mask = torch.Generator(device=device).manual_seed(seed + 11)
-    corrupt_fns = [
-        eval_views["blur5"],
-        eval_views["crop85"],
-        eval_views["downup50"],
-        eval_views["noise025"],
-        lambda x: patch_mask(x, mask_ratio=patch_mask_ratio, patch_size=patch_size, generator=gen_mask),
+    corrupt_views = [
+        ("rot10", eval_views["rot10"]),
+        ("patch20", eval_views["patch20"]),
+        ("patch_mask", lambda x: patch_mask(x, mask_ratio=patch_mask_ratio, patch_size=patch_size, generator=gen_mask)),
+        ("blur5", eval_views["blur5"]),
     ]
     corrupt_probs_acc = torch.zeros_like(p_clean)
-    for view_fn in corrupt_fns:
+    patch_ce_acc = torch.zeros(len(images_uint8), dtype=torch.float32)
+    patch_view_count = 0
+    for view_name, view_fn in corrupt_views:
         z_v = predict_logits(
             model, images_uint8, device, batch_size=batch_size, view_fn=view_fn, use_fp16_on_cuda=use_fp16_on_cuda
         )
         corrupt_probs_acc = corrupt_probs_acc + F.softmax(z_v / 2.0, dim=1)
-    corrupt_probs = corrupt_probs_acc / float(len(corrupt_fns))
+        if view_name in {"patch20", "patch_mask"}:
+            patch_ce_acc = patch_ce_acc + F.cross_entropy(z_v, y_orig, reduction="none")
+            patch_view_count += 1
+    corrupt_probs = corrupt_probs_acc / float(len(corrupt_views))
+    patch_ce = patch_ce_acc / float(max(1, patch_view_count))
     fragility_aug = (p_y_clean - corrupt_probs.gather(1, y_orig[:, None]).squeeze(1)).clamp_min(0.0)
 
     # 2. Weight-noise & magnitude-pruning fragility (snapshot and restore exact model weights)
@@ -203,6 +210,7 @@ def compute_memorization_scores(
 
     signals = [
         _rank_normalize(fragility_aug),
+        _rank_normalize(patch_ce),
         _rank_normalize(feat_outlier),
     ]
     if num_weight_samples > 0:
@@ -219,9 +227,11 @@ def compute_memorization_scores(
 
     return {
         "y_orig": y_orig,
+        "m_clean": m_clean,
         "mem_scores": mem_scores,
         "rum_strata": rum_strata,
         "fragility_aug": fragility_aug,
+        "patch_ce": patch_ce,
         "fragility_weight": fragility_weight,
         "input_grad_norm": input_grad_norm,
         "feat_outlier": feat_outlier,
@@ -313,6 +323,31 @@ def compute_oof_embedding_oracle(
     }
 
 
+def compute_margin_power_deltas(
+    z_teacher_clean: torch.Tensor,
+    y_all: torch.Tensor,
+    mem_scores: torch.Tensor | None = None,
+    base_delta: float = 12.0,
+    margin_power: float = -2.2,
+    fragility_boost: float = 0.25,
+    delta_clamp_min: float = 2.0,
+    delta_clamp_max: float = 36.0,
+) -> torch.Tensor:
+    """Compute heavy-tail per-sample delta_i scaled by inverse margin power and optional fragility tilt."""
+    z = z_teacher_clean.float().cpu()
+    y = y_all.long().cpu()
+    zy = z.gather(1, y[:, None]).squeeze(1)
+    other_max = z.scatter(1, y[:, None], -1e9).max(dim=1).values
+    m_clean = (zy - other_max).clamp_min(1.0)
+    m_med = m_clean.median().clamp_min(1.0)
+    raw = float(base_delta) * (m_clean / m_med).pow(float(margin_power))
+    if mem_scores is not None and fragility_boost != 0.0:
+        m = mem_scores.float().cpu().clamp(0.0, 1.0)
+        tilt = (1.0 + float(fragility_boost) * (2.0 * m - 1.0)).clamp_min(0.25)
+        raw = raw * tilt
+    return raw.clamp(min=float(delta_clamp_min), max=float(delta_clamp_max))
+
+
 def build_hybrid_gold_targets(
     z_teacher_clean: torch.Tensor,
     y_all: torch.Tensor,
@@ -332,13 +367,34 @@ def build_hybrid_gold_targets(
     w_shadow: float = 0.25,
     w_oof: float = 0.10,
     w_corrupt: float = 0.10,
+    delta_mode: str = "linear",
+    base_delta: float = 12.0,
+    margin_power: float = -2.2,
+    fragility_boost: float = 0.25,
+    delta_clamp_min: float = 2.0,
+    delta_clamp_max: float = 36.0,
 ) -> dict[str, torch.Tensor | float]:
     """Construct calibrated per-sample delta_i, T=2 target distributions, and T=1 moment targets."""
     z = z_teacher_clean.float().cpu()
     y = y_all.long().cpu()
     m = mem_scores.float().cpu().clamp(0.0, 1.0)
 
-    delta_i = delta_min + (delta_max - delta_min) * (m ** gamma_mem)
+    if delta_mode == "linear":
+        delta_i = delta_min + (delta_max - delta_min) * (m ** gamma_mem)
+    elif delta_mode == "margin_power":
+        delta_i = compute_margin_power_deltas(
+            z_teacher_clean=z,
+            y_all=y,
+            mem_scores=m,
+            base_delta=base_delta,
+            margin_power=margin_power,
+            fragility_boost=fragility_boost,
+            delta_clamp_min=delta_clamp_min,
+            delta_clamp_max=delta_clamp_max,
+        )
+    else:
+        raise ValueError(f"Unknown delta_mode '{delta_mode}'; expected 'linear' or 'margin_power'")
+
     t_clean = z.scatter_add(1, y[:, None], -delta_i[:, None])
     prior = compute_class_confusion_prior(z, y, num_classes=num_classes)
 
@@ -367,6 +423,8 @@ def build_hybrid_gold_targets(
     # Sharpen T=2 target probabilities back to T=1 scale for consistent CE moment estimates.
     sharpened_t1 = F.softmax(target_probs_t2.log() * 2.0, dim=1)
     est_ce = -sharpened_t1.gather(1, y[:, None]).squeeze(1).clamp_min(1e-8).log()
+    if delta_mode == "margin_power":
+        est_ce = est_ce.clamp_max(15.0)
 
     if shadow_per_sample_ce is not None:
         ref_ce = shadow_per_sample_ce.float().cpu()

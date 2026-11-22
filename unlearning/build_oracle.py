@@ -54,14 +54,20 @@ def main() -> None:
     parser.add_argument("--patch-mask-ratio", type=float, default=0.35)
     parser.add_argument("--no-input-grad", action="store_true")
     parser.add_argument("--oof-splits", type=int, default=5)
+    parser.add_argument("--delta-mode", choices=["linear", "margin_power"], default="margin_power")
+    parser.add_argument("--base-delta", type=float, default=12.0)
+    parser.add_argument("--margin-power", type=float, default=-2.2)
+    parser.add_argument("--fragility-boost", type=float, default=0.25)
+    parser.add_argument("--delta-clamp-min", type=float, default=2.0)
+    parser.add_argument("--delta-clamp-max", type=float, default=36.0)
     parser.add_argument("--delta-min", type=float, default=2.0)
     parser.add_argument("--delta-max", type=float, default=16.0)
     parser.add_argument("--gamma-mem", type=float, default=1.5)
-    parser.add_argument("--soften", type=float, default=0.10)
-    parser.add_argument("--w-shift", type=float, default=0.55)
+    parser.add_argument("--soften", type=float, default=0.0)
+    parser.add_argument("--w-shift", type=float, default=1.0)
     parser.add_argument("--w-shadow", type=float, default=0.25)
-    parser.add_argument("--w-oof", type=float, default=0.10)
-    parser.add_argument("--w-corrupt", type=float, default=0.10)
+    parser.add_argument("--w-oof", type=float, default=0.0)
+    parser.add_argument("--w-corrupt", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
@@ -143,6 +149,12 @@ def main() -> None:
         w_shadow=args.w_shadow,
         w_oof=args.w_oof,
         w_corrupt=args.w_corrupt,
+        delta_mode=args.delta_mode,
+        base_delta=args.base_delta,
+        margin_power=args.margin_power,
+        fragility_boost=args.fragility_boost,
+        delta_clamp_min=args.delta_clamp_min,
+        delta_clamp_max=args.delta_clamp_max,
     )
     class_means, class_inv_vars = compute_class_feature_stats(feats_clean, y_orig, num_classes=num_classes)
 
@@ -171,8 +183,14 @@ def main() -> None:
     summary = {
         "num_samples": int(len(forget_imgs)),
         "rum_strata_counts": [int((mem["rum_strata"] == s).sum().item()) for s in (0, 1, 2)],
+        "delta_mode": args.delta_mode,
+        "margin_power": args.margin_power,
+        "fragility_boost": args.fragility_boost,
         "delta_mean": float(targets["delta_i"].mean().item()),
         "delta_min": float(targets["delta_i"].min().item()),
+        "delta_p10": float(torch.quantile(targets["delta_i"], 0.10).item()),
+        "delta_median": float(targets["delta_i"].median().item()),
+        "delta_p90": float(torch.quantile(targets["delta_i"], 0.90).item()),
         "delta_max": float(targets["delta_i"].max().item()),
         "target_ce_mean": clean_ce_mean,
         "target_ce_std": clean_ce_std,

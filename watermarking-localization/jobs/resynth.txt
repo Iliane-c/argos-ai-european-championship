@@ -1,0 +1,4 @@
+# Re-synthesis matched filter (wl.resynth) on train + test, then cross-fitted fusion with E151.
+#   source scripts/_common.sh && POST_CMD="python -m wl.finalize output/E151_verify_e143 --kind output/E120_kind_const/kind_probs.npz --resynth" sbatch_node_public resynth 02:00:00 jobs/resynth.txt
+CMD: python -m wl.resynth --split train --device cuda
+CMD: python -m wl.resynth --split test --device cuda

@@ -104,8 +104,21 @@ def load_ac_z(split: str, names: list[str]) -> dict[str, np.ndarray]:
     return out
 
 
+def load_resynth(split: str, names: list[str]) -> dict[str, np.ndarray]:
+    """Differential re-synthesis z-maps from wl.resynth (pixel-level, native scale for `full` images)."""
+    path = ROOT_DIR / "output" / "resynth" / f"{split}.npz"
+    if not path.is_file():
+        raise SystemExit(f"ERROR: {path} missing; run `python -m wl.resynth --split {split}` first")
+    z = np.load(path)
+    table = {str(n): m.astype(np.float32) for n, m in zip(z["names"], z["z128"])}
+    missing = [n for n in names if n not in table]
+    if missing:
+        raise SystemExit(f"ERROR: {len(missing)} images missing from {path}")
+    return {n: table[n] for n in names}
+
+
 def build_features(probs: np.ndarray, names: list[str], kind: dict[str, float] | None, zbits: dict[str, np.ndarray] | None,
-                   zdec: dict[str, np.ndarray] | None = None) -> np.ndarray:
+                   zdec: dict[str, np.ndarray] | None = None, zres: dict[str, np.ndarray] | None = None) -> np.ndarray:
     parts = [_logit(probs)[..., None]]
     if kind is not None:
         pf = np.array([kind[n] for n in names], dtype=np.float32)
@@ -114,6 +127,12 @@ def build_features(probs: np.ndarray, names: list[str], kind: dict[str, float] |
         parts.append(np.clip(np.stack([zbits[n] for n in names]), -10, 10)[..., None] / 5.0)
     if zdec is not None:
         parts.append(np.clip(np.stack([zdec[n] for n in names]), -20, 20)[..., None] / 5.0)
+    if zres is not None:
+        zr = np.clip(np.stack([zres[n] for n in names]), -10, 10) / 5.0
+        parts.append(zr[..., None])
+        if kind is not None:  # the re-synthesis is at native scale only for `full` images: let it act there
+            pf = np.array([kind[n] for n in names], dtype=np.float32)[:, None, None]
+            parts.append((zr * pf)[..., None])
     return np.concatenate(parts, axis=-1).astype(np.float32)
 
 
@@ -159,6 +178,7 @@ def main() -> None:
     ap.add_argument("--bits-test", default=None, help="npz with names + bit_logits for the test images")
     ap.add_argument("--keys", type=int, default=256)
     ap.add_argument("--ac-z", action="store_true", help="Fuse the a-contrario decoder z-maps (wl.acontrario) as evidence")
+    ap.add_argument("--resynth", action="store_true", help="Fuse the re-synthesis matched-filter z-maps (wl.resynth)")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--out", default=None, help="Default: <run>/submission_final.pt")
     ap.add_argument("--submit", action="store_true")
@@ -175,7 +195,8 @@ def main() -> None:
     v_methods = np.array([meta_by_name[n]["method"] for n in v_names])
     v_gts = np.stack([masks_by_name[n] for n in v_names]).astype(np.uint8)
     v_feats = build_features(v_probs.astype(np.float32), v_names, kind_tr, load_bits(args.bits_val, messages, args.keys),
-                             load_ac_z("train", v_names) if args.ac_z else None)
+                             load_ac_z("train", v_names) if args.ac_z else None,
+                             load_resynth("train", v_names) if args.resynth else None)
 
     scores, group_means = honest_estimate(v_feats, v_gts, v_methods, v_names)
     kinds = np.array([meta_by_name[n]["kind"] for n in v_names])
@@ -194,21 +215,22 @@ def main() -> None:
         raise SystemExit(f"ERROR: test_probs is missing {len(missing)} images")
     t_probs = t_probs[[pos[n] for n in expected]].astype(np.float32)
     t_feats = build_features(t_probs, expected, kind_te, load_bits(args.bits_test, messages, args.keys),
-                             load_ac_z("test", expected) if args.ac_z else None)
+                             load_ac_z("test", expected) if args.ac_z else None,
+                             load_resynth("test", expected) if args.resynth else None)
     masks = np.stack([eiou_decide(cal.predict(t_feats[i], r["method"])) for i, r in enumerate(test_meta)]).astype(np.uint8)
 
     import torch
 
     from predict import submit, validate_submission
 
-    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}.pt"
+    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}{'_rs' if args.resynth else ''}.pt"
     torch.save({"image_names": expected, "masks": torch.from_numpy(masks).bool()}, out)
     validate_submission(out, expected)
     frac = masks.mean(axis=(1, 2))
     print(f"Wrote {out} | test images predicted mostly watermarked: {float((frac >= 0.5).mean()):.3f}")
     (run / "finalize.json").write_text(json.dumps({
         "honest_mean": round(float(scores.mean()), 4), "group_std": round(float(np.std(group_means)), 4),
-        "raw_at_0.5": round(raw, 4), "kind": args.kind, "bits": bool(args.bits_val), "ac_z": args.ac_z,
+        "raw_at_0.5": round(raw, 4), "kind": args.kind, "bits": bool(args.bits_val), "ac_z": args.ac_z, "resynth": args.resynth,
         "weights": {m: [round(float(v), 4) for v in w] for m, w in cal.w.items()},
     }, indent=2) + "\n", encoding="utf-8")
     if args.submit:

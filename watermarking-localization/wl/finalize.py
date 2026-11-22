@@ -152,7 +152,41 @@ def load_bits(path: str | None, messages: dict[str, np.ndarray], n_keys: int) ->
     return {str(n): bits_to_z(b, messages[str(n)], n_keys, seed=i) for i, (n, b) in enumerate(zip(z["names"], z["bit_logits"]))}
 
 
-def honest_estimate(feats, gts, methods, names, n_groups: int = 5, seed: int = 0) -> tuple[np.ndarray, list[float]]:
+MRF_BETAS = (0.0, 0.5, 1.0, 2.0, 4.0)
+
+
+def mrf_smooth(prob: np.ndarray, beta: float, iters: int = 6) -> np.ndarray:
+    """Mean-field inference for an Ising/Potts prior on the cell grid (MAP-MRF segmentation).
+
+    q_i <- sigmoid(logit p_i + beta * mean_{j in N8(i)} (2 q_j - 1)): calibrated cell evidence plus a
+    coupling that rewards spatially coherent regions (holes and patches are compact).
+    """
+    if beta <= 0:
+        return prob
+    l = _logit(prob)
+    q = prob.astype(np.float64)
+    for _ in range(iters):
+        s = 2 * q - 1
+        sp = np.pad(s, 1, mode="edge")
+        nb = sum(sp[1 + dy : 1 + dy + s.shape[0], 1 + dx : 1 + dx + s.shape[1]]
+                 for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)) / 8.0
+        q = 1.0 / (1.0 + np.exp(-(l + beta * nb)))
+    return q.astype(np.float32)
+
+
+def choose_betas(cal: "CellCalibrator", feats, gts, methods) -> dict[str, float]:
+    """One coupling per method, chosen on the calibration images only (inner selection, 5-value grid)."""
+    out = {}
+    for m in METHODS:
+        idx = np.flatnonzero(methods == m)
+        beliefs = [cal.predict(feats[i], m) for i in idx]
+        best = max(MRF_BETAS, key=lambda b: float(np.mean([
+            miou_batch(eiou_decide(mrf_smooth(p, b))[None], gts[i][None])[0] for p, i in zip(beliefs, idx)])))
+        out[m] = best
+    return out
+
+
+def honest_estimate(feats, gts, methods, names, n_groups: int = 5, seed: int = 0, mrf: bool = False) -> tuple[np.ndarray, list[float]]:
     """Cross-fitted per-image mIoU: calibrate on 4 groups, decide on the 5th (stratified by method)."""
     rng = np.random.default_rng(seed)
     group = np.zeros(len(names), dtype=int)
@@ -163,8 +197,11 @@ def honest_estimate(feats, gts, methods, names, n_groups: int = 5, seed: int = 0
     for g in range(n_groups):
         tr, va = group != g, group == g
         cal = CellCalibrator(seed=g).fit(feats[tr], gts[tr], methods[tr])
+        betas = choose_betas(cal, feats[tr], gts[tr], methods[tr]) if mrf else {m: 0.0 for m in METHODS}
+        if mrf:
+            print(f"   group {g}: MRF beta " + " ".join(f"{METHOD_SHORT[m]}={b}" for m, b in betas.items()))
         for i in np.flatnonzero(va):
-            pred = eiou_decide(cal.predict(feats[i], methods[i]))
+            pred = eiou_decide(mrf_smooth(cal.predict(feats[i], methods[i]), betas[methods[i]]))
             scores[i] = miou_batch(pred[None], gts[i][None])[0]
     group_means = [float(scores[group == g].mean()) for g in range(n_groups)]
     return scores, group_means
@@ -178,6 +215,7 @@ def main() -> None:
     ap.add_argument("--bits-test", default=None, help="npz with names + bit_logits for the test images")
     ap.add_argument("--keys", type=int, default=256)
     ap.add_argument("--ac-z", action="store_true", help="Fuse the a-contrario decoder z-maps (wl.acontrario) as evidence")
+    ap.add_argument("--mrf", action="store_true", help="Mean-field MRF smoothing of the calibrated beliefs (beta chosen per method, inner CV)")
     ap.add_argument("--resynth", action="store_true", help="Fuse the re-synthesis matched-filter z-maps (wl.resynth)")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--out", default=None, help="Default: <run>/submission_final.pt")
@@ -198,7 +236,7 @@ def main() -> None:
                              load_ac_z("train", v_names) if args.ac_z else None,
                              load_resynth("train", v_names) if args.resynth else None)
 
-    scores, group_means = honest_estimate(v_feats, v_gts, v_methods, v_names)
+    scores, group_means = honest_estimate(v_feats, v_gts, v_methods, v_names, mrf=args.mrf)
     kinds = np.array([meta_by_name[n]["kind"] for n in v_names])
     raw = float(miou_batch((v_probs >= 0.5).astype(np.uint8), v_gts).mean())
     print(f"[{run.name}] n_val={len(v_names)} raw@0.5={raw:.4f} | finalize (cross-fitted) = {scores.mean():.4f} ± {np.std(group_means):.4f}")
@@ -207,6 +245,7 @@ def main() -> None:
 
     # Final calibration on all validation images, applied to the test set.
     cal = CellCalibrator().fit(v_feats, v_gts, v_methods)
+    betas = choose_betas(cal, v_feats, v_gts, v_methods) if args.mrf else {m: 0.0 for m in METHODS}
     t_names, t_probs = load_probs(run / "test_probs.npz")
     pos = {str(n): i for i, n in enumerate(t_names)}
     expected = [str(r["image_name"]) for r in test_meta]
@@ -217,20 +256,21 @@ def main() -> None:
     t_feats = build_features(t_probs, expected, kind_te, load_bits(args.bits_test, messages, args.keys),
                              load_ac_z("test", expected) if args.ac_z else None,
                              load_resynth("test", expected) if args.resynth else None)
-    masks = np.stack([eiou_decide(cal.predict(t_feats[i], r["method"])) for i, r in enumerate(test_meta)]).astype(np.uint8)
+    masks = np.stack([eiou_decide(mrf_smooth(cal.predict(t_feats[i], r["method"]), betas[r["method"]]))
+                      for i, r in enumerate(test_meta)]).astype(np.uint8)
 
     import torch
 
     from predict import submit, validate_submission
 
-    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}{'_rs' if args.resynth else ''}.pt"
+    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}{'_rs' if args.resynth else ''}{'_mrf' if args.mrf else ''}.pt"
     torch.save({"image_names": expected, "masks": torch.from_numpy(masks).bool()}, out)
     validate_submission(out, expected)
     frac = masks.mean(axis=(1, 2))
     print(f"Wrote {out} | test images predicted mostly watermarked: {float((frac >= 0.5).mean()):.3f}")
     (run / "finalize.json").write_text(json.dumps({
         "honest_mean": round(float(scores.mean()), 4), "group_std": round(float(np.std(group_means)), 4),
-        "raw_at_0.5": round(raw, 4), "kind": args.kind, "bits": bool(args.bits_val), "ac_z": args.ac_z, "resynth": args.resynth,
+        "raw_at_0.5": round(raw, 4), "kind": args.kind, "bits": bool(args.bits_val), "ac_z": args.ac_z, "resynth": args.resynth, "mrf_betas": betas,
         "weights": {m: [round(float(v), 4) for v in w] for m, w in cal.w.items()},
     }, indent=2) + "\n", encoding="utf-8")
     if args.submit:

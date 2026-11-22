@@ -7,6 +7,12 @@ The expected-IoU decision (Nowozin's ratio approximation E[I]/E[U]) gave +0.007 
   * kind: the kind classifier (OOF accuracy 0.978) says whether the image is `full` (majority watermarked) or
     `patch`; the top-k is restricted to the consistent half (k >= N/2 for full, k <= N/2 for patch).
 
+  * como / mix (spatially coherent truth): independent Bernoulli cells are the wrong uncertainty model here, since
+    errors are coherent (a whole hole or patch is found or missed). The comonotone model draws ONE level u ~ U(0,1)
+    per image and sets truth = {p > u}: no parameter, it is the maximal-correlation coupling with the same cell
+    marginals (Frechet upper bound). Expected mIoU of top-k is then exact by quadrature over u. `mix` averages the
+    independent and comonotone curves (the two extreme couplings, equal weight by symmetry, no fitting).
+
     python -m wl.decision_lab output/E198g_final_gate --kind output/E120_kind_const/kind_probs.npz [--write exact|kind|exact_kind]
 """
 from __future__ import annotations
@@ -46,9 +52,26 @@ def topk_curves(p: np.ndarray, samples: int, rng: np.random.Generator):
     return order, ratio, exact
 
 
+def como_curve(p: np.ndarray, levels: int = 512) -> np.ndarray:
+    """Expected mIoU of every top-k mask when truth = {p > u}, u ~ U(0,1) (comonotone coupling)."""
+    qs = np.sort(np.clip(p.reshape(-1).astype(np.float64), 0, 1))       # ascending
+    u = (np.arange(levels) + 0.5) / levels
+    m = (N - np.searchsorted(qs, u, side="right")).astype(np.float64)    # |{p > u}|, nested in belief order
+    k = np.arange(N + 1, dtype=np.float64)[:, None]
+    lo, hi = np.minimum(k, m[None]), np.maximum(k, m[None])
+    iou1 = np.where(hi > 0, lo / np.maximum(hi, 1e-9), 1)
+    iou0 = np.where(N - lo > 0, (N - hi) / np.maximum(N - lo, 1e-9), 1)
+    return (0.5 * (iou1 + iou0)).mean(1)
+
+
 def decide(p, p_full, rule, samples, rng):
     order, ratio, exact = topk_curves(p, samples, rng)
-    curve = exact if "exact" in rule else ratio
+    if rule.startswith("como"):
+        curve = como_curve(p)
+    elif rule.startswith("mix"):
+        curve = 0.5 * (exact + como_curve(p))
+    else:
+        curve = exact if "exact" in rule else ratio
     if "kind" in rule:
         curve = curve.copy()
         if p_full >= 0.5:
@@ -60,7 +83,7 @@ def decide(p, p_full, rule, samples, rng):
     return m.reshape(GRID, GRID)
 
 
-RULES = ("ratio", "exact", "kind", "exact_kind")
+RULES = ("ratio", "exact", "kind", "exact_kind", "como", "mix", "como_kind", "mix_kind")
 
 
 def main() -> None:

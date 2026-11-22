@@ -85,6 +85,9 @@ are evaluated on a 128×128 grid.
 | E171 | 11-22 | 1 | E170 | SegFormer-B2 | Direct comparison with E104: gain of synth-v2 + fixes | real+synth-v2 | f0 | | | | | | | | planned |
 | E170 | 11-22 | 1 | E104 | synth-v2 (COCO bases, restore/paste/inpaint holes), no wrong-message negatives, no cached maps, SegFormer-B5 | Data diversity + capacity lift PixelSeal and `full` holes | real+synth-v2 | f0 | | | | | | | | planned |
 | E140_w3_noneg, E141_w3_rgbsrm, E142_w3_b5, E143_w2_40ep | 11-22 | 1 | E104/E103 | Ablations on synth-v1: no negatives; + drop agreement; + SegFormer-B5; W2 40 epochs. Numbers clash with E141_w2_msgmaps / E142_w2_long / E143_w2_r50 below; output dirs differ | The agreement channel is constant on synth and misaligned on real; negatives add label noise | real+synth-v1 | f0 | | | | | | | | running |
+| E155g_ens_w8_global | 11-22 | 2 | E161, E160, E143, E142 | Logit ensemble of 4 models, weights shared across methods (4 parameters) | W8 models add diversity | none | f0 | 0.511 | 0.646 | 0.824 | 0.627 | 0.694 | 0.660 | 0.6656 | **Current best public.** Per-method weights (E155) give 0.6645 on f0: the 0.004 difference is the optimism of 12 weights fitted on 102 images; the shared-weight version was submitted |
+| E161_w8_noshift (final) | 11-22 | 2 | E160 | W8 without the 2×2 interleave (one extractor pass) | Is the interleave needed? | real+synth-v1 | f0 | 0.504 | 0.640 | 0.819 | 0.622 | 0.687 | 0.654 | | **Best single model** (+0.011 vs E143, TM and patches), 4× cheaper than E160 |
+| E160_w8_decoder_loop (final) | 11-22 | 2 | E143 | W8 with 2×2 interleave | Decoder in the loop | real+synth-v1 | f0 | ≈0.50 | ≈0.61 | ≈0.80 | ≈0.61 | ≈0.66 | 0.641 | | Ties E143: the epoch-10 lead (+0.025) was faster convergence, not a better optimum |
 | E153_verify_e152 | 11-22 | 2 | E152 | `wl.verify` (PS, TM) on the E143+E142 ensemble | Verify gain stacks on the ensemble | none | f0 | 0.541 | 0.628 | 0.820 | 0.634 | 0.692 | 0.663 | 0.661 | +0.010 on f0 but −0.002 public vs E151: not confirmed, treated as a tie (~0.66) |
 | E152_ens_143_142 | 11-22 | 2 | E143, E142 | Logit ensemble of E143 (ResNet-50) and E142 (ResNet-34, 50 epochs) | Different errors average out | none | f0 | 0.504 | 0.630 | 0.820 | 0.634 | 0.669 | 0.651 | | Keep (+0.008 over E143, mostly TM). E153 = verify on it, queued |
 | E142_w2_long | 11-22 | 2 | E103 | W2, 50 epochs | E103 under-trained | real+synth-v1 | f0 | 0.488 | 0.604 | 0.778 | 0.611 | 0.636 | 0.623 | | +0.010 over E103, below E143: capacity matters more than length |
@@ -179,6 +182,13 @@ are evaluated on a 128×128 grid.
 | T7 | Ensembles and stacking (small CNN on probs + T1 maps, trained out-of-fold) | | |
 | T8 | Region-wise binomial p-values on known-bit agreement (calibrated maps); multi-scale sliding-window decoding + linear probe (SS) | | |
 
+## Lessons learned (night of 11-21/22)
+
+1. Never judge a model mid-training: W8 led by +0.025 at epoch 10 and tied E143 at the end (faster convergence, same optimum). Compare final checkpoints only.
+2. Check a new evidence map on a few images (no NaN, AUC) before a full run and a fusion: the first re-synthesis run had NaN maps.
+3. What wins is decoder evidence and model diversity: verify +0.010 (three times), ensembles +0.008 / +0.013. Post-processing smooth CNN maps (MRF, sizer, decoder z in the calibrator) and template matching (re-synthesis) gave nothing.
+4. f0 has 102 images: prefer the version with the fewest free parameters (shared ensemble weights), and require a public confirmation (E153: +0.010 f0, −0.002 public).
+
 ## Ideas queue (what to try next, and why)
 
 Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) and kept only if it beats the fold noise (~0.01–0.02) and moves the slice it targets.
@@ -202,8 +212,9 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 | 11-22 | 2 | E120_kind_const | 0.452 (honest all510) | 0.4451 | below best, leaderboard unchanged |
 | 11-22 | 2 | E102_segformer_b2 | 0.407 / OOF 0.432 | 0.4239 | below best |
 | 11-22 | 2 | E143_w2_r50 | 0.643 / OOF 0.646 | 0.654 | new best at the time |
-| 11-22 | 2 | E151_verify_e143 | 0.653 / OOF-postproc 0.657 | 0.663 | **current best** |
+| 11-22 | 2 | E151_verify_e143 | 0.653 / OOF-postproc 0.657 | 0.663 | best until 05:07 |
 | 11-22 | 2 | E153_verify_e152 | 0.663 / OOF-postproc 0.668 | 0.661 | not improved (within public noise) |
+| 11-22 | 2 | E155g_ens_w8_global | 0.660 | 0.6656 | **current best** |
 
 ## Decisions
 

@@ -30,7 +30,8 @@ counterpart at test time, with the counterpart's weight (`wl.ensemble --test-run
    ```
    Keep a member only if the f0 score of the ensemble does not drop when it is added.
 3. Verify (PS, TM) with the size gate (E182: oversized refined boxes are containing boxes, +0.007 on f0):
-   `scripts/run_on_job.sh <jobid> <gpu> "python -m wl.verify --id E199_final --sources output/E199_final_ens output/E121_analytic_rect_v2 --kind output/E120_kind_const/kind_probs.npz --methods pixelseal trustmark --max-area-q 0.9"`
+   `scripts/run_on_job.sh <jobid> <gpu> "python -m wl.verify --id E199_final --sources output/E199_final_ens output/E121_analytic_rect_v2 --kind output/E120_kind_const/kind_probs.npz --methods pixelseal trustmark --max-area-q 0.9 --extra-proposals 5"`
+   (`--extra-proposals 5`, E187: when no main component verifies, also try the map's next components; +0.004 on f0, opt-in.)
    If verify already ran without the gate, apply it on CPU (seconds, no GPU) and check the paired difference:
    `python -m wl.verify --id E199_final_g --regate output/E199_final --max-area-q 0.9 && python -m wl.compare output/E199_final output/E199_final_g`
 4. Submit if f0 beats the last submitted candidate: `source .env && ./scripts/runs/submit.sh output/E199_final --submit`

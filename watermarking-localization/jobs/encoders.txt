@@ -1,0 +1,6 @@
+# Larger / different encoders on the best recipe, then TTA. Pre-cache weights on the login node first:
+#   python -c "import segmentation_models_pytorch as smp; smp.Unet('resnet101', encoder_weights='imagenet'); smp.Unet('tu-convnext_small', encoder_weights='imagenet')"
+#   source scripts/_common.sh && POST_CMD="python -m wl.infer --run output/E207_w8ns_r101 --id E207_tta; python -m wl.infer --run output/E208_w8ns_convnext --id E208_tta" sbatch_node_public enc 02:30:00 jobs/encoders.txt
+configs/E207_w8ns_r101.yaml
+configs/E208_w8ns_convnext.yaml
+configs/E209_w2_r101.yaml

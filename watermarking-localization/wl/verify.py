@@ -19,6 +19,14 @@ costs more clean-class IoU than it gains (on test, accepted boxes with z < 8 hav
 if its area is at most the q-quantile of the method's training patch bounding-box areas. The
 quantiles are computed without the images being scored, so the validation score stays honest.
 
+Extra proposals (--extra-proposals K): only the main component of each source is tried above. When
+none of them verifies, the next K connected components of the first source's map (thresholds 0.5 and
+0.2, largest first) are refined too, and the best one is accepted if z >= --extra-z-min (5 by
+default: more candidates, so a stricter threshold). Case on f0 (E187): the map had found a TrustMark
+patch (p = 1 on it) but its largest component was a wrong blob; the second component decodes at
+z = 9.6 and the image goes from 0.45 to 0.95. Rectangular PS/TM patches decode at their true box with
+z of 10-17; thin or tiny PixelSeal bars and object-shaped patches do not decode at all.
+
 Nothing is fitted on labels: the reported validation score is honest.
 
     python -m wl.verify --id E150_verified --sources output/E103_w2_wam_multitask output/E121_analytic_rect_v2 \
@@ -27,6 +35,11 @@ Nothing is fitted on labels: the reported validation score is honest.
 Re-gate an existing verify run on CPU (no decoding; reverts oversized boxes to the first source):
 
     python -m wl.verify --id E182_gate_e158 --regate output/E158_verify_e157g --max-area-q 0.9
+
+Verify with the size gate and extra proposals (decoding, GPU):
+
+    python -m wl.verify --id E199_final --sources output/E199_final_ens output/E121_analytic_rect_v2 \
+        --kind output/E120_kind_const/kind_probs.npz --methods pixelseal trustmark --max-area-q 0.9 --extra-proposals 5
 """
 from __future__ import annotations
 
@@ -127,6 +140,27 @@ def candidate_box(prob: np.ndarray, thr: float = 0.5) -> tuple[tuple[int, int, i
     return box, fill
 
 
+def component_boxes(prob: np.ndarray, k: int, thresholds=(0.5, 0.2)) -> list[tuple[tuple[int, int, int, int], float]]:
+    """Bounding boxes and fill ratios of the largest connected components of the map, for each threshold
+    in turn (no duplicates), at most 2k boxes."""
+    seen, out = set(), []
+    for thr in thresholds:
+        labels, n = connected_components(prob >= thr)
+        if n == 0:
+            continue
+        sizes = np.bincount(labels.reshape(-1))[1:]
+        for lab in np.argsort(-sizes)[:k]:
+            comp = labels == lab + 1
+            if comp.sum() < 4:
+                continue
+            ys, xs = np.nonzero(comp)
+            box = (int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1)
+            if box not in seen:
+                seen.add(box)
+                out.append((box, float(comp.sum()) / ((box[1] - box[0]) * (box[3] - box[2]))))
+    return out[: 2 * k]
+
+
 def box_area(box) -> float:
     """Area of a (y0, y1, x0, x1) grid box as a fraction of the image."""
     y0, y1, x0, x1 = box
@@ -162,7 +196,8 @@ def render(prob: np.ndarray, box: tuple[int, int, int, int], fill: float, rect_f
     return out
 
 
-def run_split(split, names, meta, sources, kind, verifier, data_root, z_min, rect_fill, log, methods=None, max_area=None):
+def run_split(split, names, meta, sources, kind, verifier, data_root, z_min, rect_fill, log, methods=None, max_area=None,
+              extra=0, extra_z_min=5.0):
     out_probs, decisions = [], {}
     split_dir = Path(data_root) / split
     for n in names:
@@ -191,10 +226,27 @@ def run_split(split, names, meta, sources, kind, verifier, data_root, z_min, rec
                 if max_area is None or box_area(box) <= max_area[meta[n]["method"]]:
                     cands.append((z, si, box, cb[1]))
             best = max(cands, default=None, key=lambda c: c[0])
+            extra_best = None
+            if extra and (best is None or best[0] < z_min):
+                # 3. Still nothing: the next components of the first source's map, with a stricter threshold.
+                for box0, fill0 in component_boxes(base_map, extra):
+                    h, w = box0[1] - box0[0], box0[3] - box0[2]
+                    if (primary_cb is not None and box0 == primary_cb[0]) or min(h, w) < 3 \
+                            or max(h, w) / min(h, w) > MAX_ASPECT[meta[n]["method"]]:
+                        continue
+                    box, z = verifier.refine(box0)
+                    if (max_area is None or box_area(box) <= max_area[meta[n]["method"]]) and \
+                            (extra_best is None or z > extra_best[0]):
+                        extra_best = (z, 0, box, fill0)
             if best is not None and best[0] >= z_min:
                 z, si, box, fill = best
                 out_probs.append(render(sources[si][n], box, fill, rect_fill))
                 decisions[n] = {"source": si, "z": round(z, 2), "box": list(box), "fill": round(fill, 3), "refined": True}
+            elif extra_best is not None and extra_best[0] >= extra_z_min:
+                z, si, box, fill = extra_best
+                out_probs.append(render(sources[0][n], box, fill, rect_fill))
+                decisions[n] = {"source": 0, "z": round(z, 2), "box": list(box), "fill": round(fill, 3), "refined": True,
+                                "extra": True}
             else:
                 out_probs.append(base_map)
                 decisions[n] = {"source": -1, "z": round(float(z0), 2)}
@@ -254,6 +306,9 @@ def main() -> None:
     ap.add_argument("--max-area-q", type=float, default=None,
                     help="Size gate: reject refined boxes larger than this quantile of the method's training patch box areas (e.g. 0.9)")
     ap.add_argument("--regate", default=None, help="Existing verify run dir: apply the size gate on CPU without decoding")
+    ap.add_argument("--extra-proposals", type=int, default=0,
+                    help="When no main component verifies, also try the next K components of the first source's map (e.g. 5)")
+    ap.add_argument("--extra-z-min", type=float, default=5.0, help="Significance needed by an extra proposal")
     ap.add_argument("--keys", type=int, default=256)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
@@ -284,11 +339,12 @@ def main() -> None:
     v_names = sorted(set.intersection(*[set(s) for s in val_src]))
     v_limits = patch_area_limits(meta_by_name, masks_by_name, args.max_area_q, set(v_names)) if args.max_area_q else None
     v_probs, v_dec = run_split("train", v_names, meta_all, val_src, kind, verifier, args.data, args.z_min, args.rect_fill, print,
-                               args.methods, v_limits)
+                               args.methods, v_limits, args.extra_proposals, args.extra_z_min)
     save_probs(out_dir / "val_probs.npz", v_names, v_probs)
     base = evaluate_predictions(v_names, np.stack([val_src[0][n] for n in v_names]), meta_by_name, masks_by_name, threshold=0.5)
     metrics = evaluate_predictions(v_names, v_probs, meta_by_name, masks_by_name, threshold=0.5)
     metrics.update({"id": args.id, "sources": [r.name for r in runs], "z_min": args.z_min, "max_area_q": args.max_area_q,
+                    "extra_proposals": args.extra_proposals, "extra_z_min": args.extra_z_min,
                     "val": f"intersection-{len(v_names)}", "first_source_same_images": base["mean"]})
     write_metrics(out_dir, metrics)
     print(f"[{args.id}] first source on the same {len(v_names)} images: {base['mean']:.4f} -> verified: {metrics['mean']:.4f}")
@@ -305,7 +361,7 @@ def main() -> None:
         t_names = [r["image_name"] for r in test_meta]
         t_limits = patch_area_limits(meta_by_name, masks_by_name, args.max_area_q, set()) if args.max_area_q else None
         t_probs, t_dec = run_split("test", t_names, meta_all, test_src, kind, verifier, args.data, args.z_min, args.rect_fill, print,
-                                   args.methods, t_limits)
+                                   args.methods, t_limits, args.extra_proposals, args.extra_z_min)
         save_probs(out_dir / "test_probs.npz", t_names, t_probs)
         decisions["test"] = t_dec
     (out_dir / "verify.json").write_text(json.dumps(decisions, indent=1) + "\n", encoding="utf-8")

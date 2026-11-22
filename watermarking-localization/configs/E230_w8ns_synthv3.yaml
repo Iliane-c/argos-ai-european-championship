@@ -1,0 +1,8 @@
+id: E230_w8ns_synthv3
+parent: E161_w8_noshift
+# One change vs E161: synthetic shards v3 = v1 recipe + down-then-up resampling after embedding
+# (wl.synth --resample-prob 1.0). E188: the real images carry no embedding trace (resampled after marking);
+# synth-v1 kept it, so part of what the networks learned does not exist at test time. Judged on f0 vs E161 (0.654)
+# and E161_tta (0.665), paired (wl.compare), same seed.
+data:
+  train: [real, synth-v3]

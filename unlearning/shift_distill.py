@@ -180,6 +180,7 @@ for step in range(steps):
     with torch.autocast("cuda", dtype=amp_dtype or torch.float32, enabled=amp_dtype is not None):
         zs, rs = student(torch.cat([v, r])).float().split(args.bs)
     loss = kd(q1, zs, 1.0) + kd(q2, zs, 2.0) + args.retain_weight * kd(F.softmax(rt / 2, 1), rs, 2.0)
+    # shortcut: depth loss applies to every augmented view, blur included; restrict to mild views if blur tails overshoot
     if args.depth_weight > 0:
         tgt = depth_ce[idx]; deep = ~tgt.isnan()
         if deep.any():

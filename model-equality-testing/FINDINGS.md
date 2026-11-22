@@ -95,8 +95,30 @@ Late submissions (all public 0.10, files in `ep1/queue/final/`):
 | v7 | outliers merged into their base-model family (X+04+{02,23}, Y+06+20, Z+10), each its own model |
 | v9 | v7 + ep-02 split from ep-23 (the only endpoint below the disguise range at 20 answers) |
 | v10 | v7 + ep-30 alone, {05,16} together (lottery, no evidence) |
+| v8 (11:03) | v7 + worst base-model fits split off: {05,16}, 31, 30, 07, 33, 14 |
+| v11 | v7 + in each family the worse-fitting half as singletons — prepared, **not submitted** |
 
-ep budget at the end: 0 on every endpoint.
+ep budget at the end: 0 on every endpoint. Final best public score: **0.10**.
+
+## 9. Retrospective: what a 1.00 team did differently
+
+Summary of the publicly shared approach of team Fable 4.2 (https://github.com/AnMaLeNo/Fable-4.2), as we understand it;
+their code is not copied here.
+
+| Step | Their approach | Ours |
+|---|---|---|
+| Base models | Same three as we found (Qwen2.5-3B, Qwen2.5-1.5B, Llama-3.2-1B) | Found the same, but only on the last morning |
+| Reference point | Every endpoint is compared with a local **replica** of its base model, which gives the exact probability of each answer (endpoints sample at temperature 0.7) | We mostly compared endpoints with each other, so disguises looked like differences |
+| fp8 | Build a local **fp8 (E4M3) replica** and use the likelihood ratio replica-fp8 vs replica-bf16 per endpoint; on ref only the real fp8 endpoint prefers the fp8 replica | We tried distribution tests, which cannot see a change this small |
+| LoRA | **Fit the temperature first** (absorbs the temperature disguise), then look at per-prompt residuals (χ²) against the replica; what still deviates is a LoRA | Our "null range" simulated disguises but never fitted temperature per endpoint |
+| Decision rule | Merge into the base group **only** what is positively identified as a disguise (temperature, watermark, system prompt); everything else is a different model | The opposite: "fits the base model ⇒ same model", so we never split anything |
+| Budget | ~40 one-word questions in one request; 35–70 queries per endpoint | One question per request; ~100 queries per endpoint |
+| Submissions | Each submission changes exactly one thing, used as an experiment; 0.1 → 1.0 | Several changes per submission early on, so scores were hard to attribute |
+
+Lessons: (1) identify the base model first and compare against a local replica, not endpoint vs endpoint;
+(2) model the known disguises explicitly (temperature fit, system prompt) before calling anything a difference;
+(3) for fp8, quantize the replica yourself and use a likelihood ratio; (4) default to "different model" unless a disguise is identified;
+(5) pack many questions per request to save budget; (6) one change per submission.
 
 ## Where things are
 

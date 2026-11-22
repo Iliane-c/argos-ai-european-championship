@@ -2,8 +2,10 @@
 
 1. Kind gating. Decoding the whole image with the known message separates the two kinds almost
    perfectly (E01: bit accuracy ~0.97 on `full` images, ~0.53 on `patch`). A per-method threshold on
-   the cached `bit_acc_full`, fit on the 510 train images, decides the kind. When a map disagrees with
-   it, the map is re-ranked so its minority region gets the median size of that kind.
+   that bit accuracy, fit on the 510 train images, decides the kind. When a map disagrees with it, the
+   map is re-ranked so its minority region gets the median size of that kind. The bit accuracy comes
+   from the feature cache (`bit_acc_full`) when it exists; otherwise the kit decoders compute it here
+   (one call per image, about a minute on a GPU) and it is saved to output/cache/bit_acc_<split>.json.
 2. Patch box refinement (`--box`, needs the kit models and a GPU). The dataset embedded each patch at
    the scale of its own rectangle, so the exact rectangle decodes best (E01). For `patch` images, every
    edge of the main predicted component's bounding box is moved by coordinate ascent to maximize the
@@ -21,7 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 from PIL import Image
@@ -48,18 +50,58 @@ RHO_GRID = (0.5, 0.7, 0.85, 0.95, 1.0)  # accept a refined box if score0 <= rho 
 # ----------------------------------------------------------------------------- kind gating
 
 
-def fit_kind_thresholds(cache: FeatureCache, meta_by_name: dict[str, dict[str, Any]]) -> dict[str, dict[str, float]]:
+def whole_image_bit_acc(
+    split: str,
+    meta_by_name: dict[str, dict[str, Any]],
+    data_root: Path,
+    cache: FeatureCache,
+    kit_models: Callable[[], dict[str, Any]],
+    store: Path,
+) -> dict[str, float]:
+    """Whole-image bit accuracy with the known message for every image of `split`.
+
+    Order: `store` (JSON written by an earlier run), then the feature cache, then the kit decoders.
+    """
+    accs: dict[str, float] = json.loads(store.read_text(encoding="utf-8")) if store.is_file() else {}
+    todo = []
+    for name in meta_by_name:
+        if name in accs:
+            continue
+        feats = cache.load(split, name)
+        if feats is not None:
+            accs[name] = float(feats["bit_acc_full"])
+        else:
+            todo.append(name)
+    if not todo:
+        return accs
+
+    import torch
+
+    models = kit_models()
+    print(f"decoding {len(todo)} {split} images (no cached bit_acc_full)")
+    for name in todo:
+        row = meta_by_name[name]
+        method = row["method"]
+        img = np.asarray(Image.open(data_root / split / "images" / f"{name}.png").convert("RGB"), dtype=np.uint8)
+        bits = np.array([int(c) for c in row["message"]], dtype=np.uint8)[: NBITS[method]]
+        x = torch.from_numpy(img.copy()).permute(2, 0, 1)[None].float().div(255.0)
+        with torch.no_grad():
+            logits = models[method].logits(x)[0].float().cpu().numpy()
+        accs[name] = float(((logits > 0) == (bits == 1)).mean())
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps(accs), encoding="utf-8")
+    return accs
+
+
+def fit_kind_thresholds(bit_acc: dict[str, float], meta_by_name: dict[str, dict[str, Any]]) -> dict[str, dict[str, float]]:
     """Per-method threshold on whole-image bit accuracy that best separates full from patch on train."""
     out: dict[str, dict[str, float]] = {}
     for method in METHODS:
         accs, is_full = [], []
         for name, meta in meta_by_name.items():
-            if meta["method"] != method:
+            if meta["method"] != method or name not in bit_acc:
                 continue
-            feats = cache.load("train", name)
-            if feats is None:
-                continue
-            accs.append(float(feats["bit_acc_full"]))
+            accs.append(bit_acc[name])
             is_full.append(meta["kind"] == "full")
         if not accs:
             continue
@@ -79,17 +121,15 @@ def fit_kind_thresholds(cache: FeatureCache, meta_by_name: dict[str, dict[str, A
 def decide_kinds(
     names: Sequence[str],
     methods: Sequence[str],
-    split: str,
     probs: np.ndarray,
-    cache: FeatureCache,
+    bit_acc: dict[str, float],
     thresholds: dict[str, dict[str, float]],
 ) -> np.ndarray:
-    """True = `full`. Uses the cached whole-image decode; falls back to the map for uncached images."""
+    """True = `full`. Uses the whole-image decode; falls back to the map for images without one."""
     kinds = np.empty(len(names), dtype=bool)
     for i, (n, m) in enumerate(zip(names, methods)):
-        feats = cache.load(split, n)
-        if feats is not None and m in thresholds:
-            kinds[i] = float(feats["bit_acc_full"]) >= thresholds[m]["threshold"]
+        if n in bit_acc and m in thresholds:
+            kinds[i] = bit_acc[n] >= thresholds[m]["threshold"]
         else:
             kinds[i] = float((probs[i] >= 0.5).mean()) >= 0.5
     return kinds
@@ -281,12 +321,22 @@ def main() -> None:
     meta_by_name, masks_by_name = load_train_ground_truth(data_root)
     test_meta = {r["image_name"]: r for r in json.loads((data_root / "test" / "metadata.json").read_text(encoding="utf-8"))}
 
-    thresholds = fit_kind_thresholds(cache, meta_by_name)
+    wm_models: dict[str, Any] = {}
+
+    def kit_models() -> dict[str, Any]:
+        if not wm_models:
+            wm_models.update(load_kit_models(METHODS, device=args.device))
+        return wm_models
+
+    store = Path(args.cache).parent
+    acc_train = whole_image_bit_acc("train", meta_by_name, data_root, cache, kit_models, store / "bit_acc_train.json")
+    acc_test = whole_image_bit_acc("test", test_meta, data_root, cache, kit_models, store / "bit_acc_test.json")
+    thresholds = fit_kind_thresholds(acc_train, meta_by_name)
     print("kind thresholds on bit_acc_full (train):", json.dumps(thresholds))
 
     v_names, v_probs = load_probs(run_dir / "val_probs.npz")
     v_methods = [meta_by_name[n]["method"] for n in v_names]
-    v_full = decide_kinds(v_names, v_methods, "train", v_probs, cache, thresholds)
+    v_full = decide_kinds(v_names, v_methods, v_probs, acc_train, thresholds)
     gt_full = np.array([meta_by_name[n]["kind"] == "full" for n in v_names])
     print(f"val kind accuracy (decode): {float((v_full == gt_full).mean()):.4f} | "
           f"map kind accuracy: {float((((v_probs >= 0.5).mean(axis=(1, 2)) >= 0.5) == gt_full).mean()):.4f}")
@@ -302,14 +352,12 @@ def main() -> None:
 
     t_names, t_probs = load_probs(run_dir / "test_probs.npz")
     t_methods = [test_meta[n]["method"] for n in t_names]
-    t_full = decide_kinds(t_names, t_methods, "test", t_probs, cache, thresholds)
+    t_full = decide_kinds(t_names, t_methods, t_probs, acc_test, thresholds)
     t_gated = np.stack([gate_kind(p, bool(f)) for p, f in zip(t_probs, t_full)])
     v_final, t_final = v_gated, t_gated
 
     if args.box:
-        methods_used = sorted(set(v_methods) | set(t_methods))
-        wm_models = load_kit_models(methods_used, device=args.device)
-        v_boxes = compute_boxes("train", v_names, v_gated, v_full, meta_by_name, data_root, wm_models, args.device, args.batch)
+        v_boxes = compute_boxes("train", v_names, v_gated, v_full, meta_by_name, data_root, kit_models(), args.device, args.batch)
         best = (1.01, 0.0, score(v_gated))
         for fill_thr in FILL_GRID:
             for rho in RHO_GRID:
@@ -322,7 +370,7 @@ def main() -> None:
         report.update({"box_fill_thr": fill_thr, "box_rho": rho, "val_box": round(s_best, 4), "val_boxes": v_boxes})
         v_final = apply_refinement(v_names, v_gated, v_boxes, fill_thr, rho)
         if fill_thr <= 1.0:
-            t_boxes = compute_boxes("test", t_names, t_gated, t_full, test_meta, data_root, wm_models, args.device, args.batch)
+            t_boxes = compute_boxes("test", t_names, t_gated, t_full, test_meta, data_root, kit_models(), args.device, args.batch)
             t_final = apply_refinement(t_names, t_gated, t_boxes, fill_thr, rho)
             report["test_boxes"] = t_boxes
             print(f"test: {len(t_boxes)} patch images refined")

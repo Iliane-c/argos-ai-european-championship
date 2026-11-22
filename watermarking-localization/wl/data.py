@@ -432,6 +432,8 @@ def build_dataloaders(
                     augment_fn=aug_fn,
                     as_tensor=True,
                     seed=seed,
+                    # RAM for decompressed shards; lower it on small machines (Colab standard: 12.7 GB).
+                    max_cache_gb=float(data_cfg.get("synth_cache_gb", 16.0)),
                 )
             )
 

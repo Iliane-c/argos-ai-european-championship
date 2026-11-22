@@ -204,3 +204,25 @@ The T3-012 scores up to here were 0.1930 at γ=1.5 (2671) and 0.2088 at γ=1.7 (
 | Depth 40% (6–14) + repair, γ=1.03 | 2.40/3.21 | — | 1.60 | 0.221 | — |
 
 At matched mean CE, each wider band raised the loss std and lowered drift, but the std gain fell from +0.2 to +0.1 per step. The gold models' std is unknown, so only the leaderboard can show where widening stops paying. Checkpoints are in `task3/output/t3-012/`.
+
+### Leaderboard tuning of the depth + repair stack
+
+The pipeline for each band is to train, interpolate to clean mean CE 2.40, repair (2 epochs, weight 3), then extrapolate. Candidates were compared at the scored operating point, because comparisons before repair understated the last two leaderboard gains.
+
+| Submission | Candidate | Clean CE mean/std | Retain KL | Public score |
+| --- | --- | ---: | ---: | ---: |
+| 3019 | 40% band (6–14), γ=1.03 | 2.40/3.21 | 0.221 | 0.2537 |
+| 3051 | 40% band, γ=1.10 | 2.65/3.36 | 0.247 | 0.2686 |
+| 3088 | 40% band, γ=1.20 | 2.98/3.52 | 0.287 | 0.2818 |
+| 3124 | 40% band, γ=1.35 | 3.44/3.67 | 0.352 | 0.2841 |
+| 3156 | 50% band (6–15), γ=1.35 | 3.49/3.82 | 0.341 | 0.2952 |
+| 3192 | 50% band, γ=1.45 | — | — | 0.2917 |
+| **3226** | **60% band (6–16), γ=1.35** | **3.54/3.92** | **0.336** | **0.3044** |
+| 3263 | 60% band, γ=1.25 | — | — | 0.3002 |
+
+With the sharper, deeper targets the strength optimum moved to γ≈1.35 after repair, with a mean CE of about 3.5. Two runs were rejected locally without submission:
+
+- **Graded 80% band (4–16):** std 3.94 against 3.92 at the operating point, versus about +0.10 per earlier step.
+- **Stronger repair (4 epochs, weight 5):** at matched mean it had std 3.88 and retain KL 0.333, so the retention it gained came back out of forgetting.
+
+Option 3 of `NEXT_APPROACHES.md` (spreading rival mass) was not run, because both earlier softening attempts lowered the score. Options 2 and 5 did not fit the remaining time. The best checkpoint is `task3/output/t3-012/dep6rep_g1.35.pt`.

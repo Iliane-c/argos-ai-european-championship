@@ -79,6 +79,11 @@ are evaluated on a 128×128 grid.
 
 | ID | Time | Owner | Parent | Change | Hypothesis | Data | Val | PS | TM | SS | Full | Patch | Mean | Public | Verdict |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| E182_gate_e158 | 11-22 | 1 | E158 | `wl.verify --regate --max-area-q 0.9` (CPU, no decoding): a refined box larger than the 90 % quantile of the method's training patch box areas (folds 1–4 when scoring f0: PS 0.36, TM 0.39, SS 0.30 of the image) reverts to the first source | A significant z only proves that the message is somewhere in the box; oversized boxes are *containing* boxes and cost clean-class IoU | none | f0 | 0.545 | 0.654 | 0.846 | 0.631 | 0.732 | 0.682 | | **Keep** (+0.007 vs E158; +0.006 / +0.007 on E153 / E156; any quantile 0.75–0.95 gives +0.005–0.007 and never a loss). Only 2 f0 images flip (2 wins / 0 losses), but the test statistics support the mechanism: accepted test boxes with z < 8 have a median area of 0.16–0.33, those with z ≥ 8 0.02–0.08. Reverts 21 of the 89 refined test boxes |
+| E183_decision_rules | 11-22 | 1 | E161_tta | Cross-fitted Platt calibration, then Bayes-optimal decisions: RankSEG-RMA (= current `eiou_decide`), dependence-aware variant (per-image latent logit shift, s = 0.5–3, after Wang & Dai 2026), rectangle model selection by expected mIoU, rectangle snap | Decision theory recovers part of the per-image threshold oracle (+0.03) | none | f0 | 0.514 | 0.642 | 0.839 | | | 0.6646 | | **Drop**: same masks (Δ = 0.0000; rectangle snap −0.002 to −0.005). The maps are near-binary (4–10 % of cells in (0.05, 0.95)), so every decision rule returns the same mask |
+| E184_stack_context | 11-22 | 1 | E161_tta | (a) Logarithmic opinion pool: per-method cross-fitted logistic stacking of the E161_tta, E143_tta, E160_tta and E142 logits (extremizing allowed); (b) auto-context: per-cell logistic regression on multi-scale smoothed logits, local max, image statistics and border distance | Learned pooling or spatial context re-ranks the cells | none | f0 | | | | | | 0.652 / 0.645 | | **Drop**: −0.013 (stacking), −0.020 (auto-context, sign test p = 0.002). The cell log-loss does not track per-image mIoU |
+| E185_edge_aware | 11-22 | 1 | E161_tta | Edge-aware refinement of the calibrated beliefs before the eIoU decision: guided filter (r 2–4), SLIC / Felzenszwalb superpixel pooling, bilateral dense-CRF mean field (9×9 window); setting chosen by nested cross-fitting | Snap masks to object boundaries | none | f0 | | | | | | 0.6645 | | **Drop**: −0.0001 with the nested choice, ±0.000 for the best fixed setting: nothing to sharpen on near-binary maps |
+| E186_forensic_stats | 11-22 | 1 | — | Blind forensic statistics on the 128 grid: Splicebuster (3rd-order residual co-occurrences, per-image 2-component Gaussian mixture by EM), local high-pass energy, local noise level (MAD) | Edit traces (inpainting, transplantation) show regions the watermark does not | none | all510 | | | | | | | | **Drop**: within-image cell AUC 0.50 (Splicebuster), 0.59 (energy), 0.58 (noise); on f0 PixelSeal 0.48–0.51, where the model has 0.67–0.69 |
 | E180 | 11-22 | 1 | E104 | `wl.refine`: kind gating from cached whole-image bit accuracy | Wrong-kind maps cost ~0.5 each; decoding fixes them for free | none | f0 | | | | | | | | planned |
 | E173 | 11-22 | 1 | E170 | HRNet-W48 + FPN | High-res stream helps faint patterns; ensemble diversity | real+synth-v2 | f0 | | | | | | | | planned |
 | E172 | 11-22 | 1 | E103 | synth-v2, 35 epochs | Same W2 recipe gains from data diversity | real+synth-v2 | f0 | | | | | | | | planned |
@@ -193,6 +198,40 @@ are evaluated on a 128×128 grid.
 3. What wins is decoder evidence and model diversity: verify +0.010 (three times), ensembles +0.008 / +0.013. Post-processing smooth CNN maps (MRF, sizer, decoder z in the calibrator) and template matching (re-synthesis) gave nothing.
 4. f0 has 102 images: prefer the version with the fewest free parameters (shared ensemble weights), and require a public confirmation (E153: +0.010 f0, −0.002 public).
 
+## Statistical methods round (E182–E186)
+
+Question: which state-of-the-art statistical (non-deep-learning) methods still add accuracy on top of the
+W2 / W8 maps? Every test runs on f0 (102 images), cross-fitted or with a rule fixed in advance, and is
+compared image by image with `python -m wl.compare` (paired bootstrap CI and sign test).
+
+What limits the post-hoc layer:
+
+- The maps are near-binary: only 4–10 % of the cells lie in (0.05, 0.95). Even an oracle that picks the
+  best threshold for each image only reaches 0.6955 (E161_tta: 0.6647). Decision rules can win at most
+  +0.03, and none wins any of it.
+- The remaining error is missing evidence. On f0, E161_tta predicts nothing for 8 of 17 PixelSeal patches
+  (none with IoU > 0.5), for 5 of 17 PixelSeal holes and for 6 of 17 TrustMark holes.
+- Decoder evidence is bimodal: on f0, the verified patch boxes have z ≥ 9.8 or z ≤ 2.3. The accepted test
+  boxes with z < 8 are far larger than real patches (median area 0.16–0.33 against 0.04).
+
+| Family | State of the art | Run | Result |
+|---|---|---|---|
+| Bayes-optimal IoU decision | RankSEG / RankSEG-RMA (Dai & Li, JMLR 2023; arXiv 2510.15362); dependence-aware RankSEG (Wang & Dai, arXiv 2609.38930) | E183 | 0: `eiou_decide` already is the RMA rule |
+| Calibration and forecast aggregation | Platt scaling; logarithmic opinion pool with extremizing (Satopää et al., IJF 2014) | E184a | −0.013 |
+| Contextual stacking | Auto-context (Tu & Bai, TPAMI 2010) | E184b | −0.020 |
+| Edge-aware MRF / CRF | Dense CRF (Krähenbühl & Koltun, NeurIPS 2011), fast bilateral solver (Barron & Poole, ECCV 2016), guided filter, superpixel pooling | E185 | 0 |
+| Blind forensic statistics | Splicebuster (Cozzolino, Poggi & Verdoliva, WIFS 2015), local noise inconsistency | E186 | AUC 0.50–0.59 |
+| A-contrario detection and multiple testing | Number of false alarms (Desolneux, Moisan & Morel), random-key z (Fernandez et al., WIFS 2023), e-BH block tests for watermark localization (arXiv 2611.02030) | E182 | **+0.007** (size gate) |
+
+Other checks, all negative: blind border priors for holes (frames, strips) give at most +0.004; no image is
+a near-duplicate of another (32×32 thumbnail correlation < 0.95 everywhere), so StegaStamp masks cannot be
+transferred to PixelSeal or TrustMark twins.
+
+Alternative to the size gate: z ≥ 6 for searched boxes (Bonferroni / NFA over the rectangle search) gives
+the same f0 gain. On test, however, it keeps 9 boxes larger than the 90 % quantile (z 6–8) and drops small
+boxes with z 4–6. That is the wrong way round under the asymmetric loss: a wrong small box costs about
+0.01, a right one gains about 0.3. The size gate is preferred.
+
 ## Ideas queue (what to try next, and why)
 
 Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) and kept only if it beats the fold noise (~0.01–0.02) and moves the slice it targets.
@@ -236,6 +275,10 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 - 2026-11-22: Whole-image re-embedding correlation (NCC of the image with `embed(x, m) - x`, 32 px windows)
   measured on train with the real embedders: AUC 0.72–0.77 for `full` holes (TrustMark, StegaStamp), ~0.5
   for patches (wrong scale). A side cue only.
+- 2026-11-22: Verify runs use `--max-area-q 0.9`; on a run that already exists, `wl.verify --regate` applies
+  the same gate on CPU in seconds (E182). Post-hoc decision rules, smoothing, stacking and blind forensic
+  statistics are exhausted on these maps (E183–E186): further gains need new evidence for PixelSeal patches
+  and PixelSeal / TrustMark holes.
 - 2026-11-22: Training-free ceiling is ~0.45–0.49 (honest, cross-fitted); learned W2 models reach 0.62–0.64.
   The statistical track is used as a verifier/fusion stage on top of W2, not as a standalone predictor.
 - 2026-11-22: `wl.verify` is applied to PixelSeal and TrustMark only (E150: helps PS/TM, hurts StegaStamp).

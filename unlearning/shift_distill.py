@@ -16,6 +16,8 @@ Options for the follow-up experiments:
                     like a model on images it never saw)
   --depth-weight w  Huber loss pulling the per-image CE of the hardest --depth-frac (lowest clean margin)
                     towards --depth-lo..--depth-hi by hardness; KL alone stalls once target p_true is ~0
+  --repair CKPT     retention repair: start from CKPT, pin forget views to CKPT's own frozen outputs and
+                    sample retain anchors in proportion to their drift (use with --delta 0 --train-blocks 1)
   --split           train on 80% of the forget set, report the held-out 20% (leakage check)
 """
 import argparse
@@ -49,6 +51,7 @@ p.add_argument("--depth-weight", type=float, default=0.0)
 p.add_argument("--depth-frac", type=float, default=0.1)
 p.add_argument("--depth-lo", type=float, default=6.0)
 p.add_argument("--depth-hi", type=float, default=10.0)
+p.add_argument("--repair", type=Path)
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
 p.add_argument("--seed", type=int, default=0)
@@ -68,6 +71,13 @@ student = tt.load_model()
 student.set_grad_checkpointing(True)
 for q in student.parameters():
     q.requires_grad_(False)
+fteacher = teacher  # source of forget-view targets
+if args.repair:
+    student.load_state_dict(torch.load(args.repair, map_location="cpu", weights_only=True), strict=True)
+    fteacher = tt.build_model().to(dev).eval()
+    fteacher.load_state_dict(student.state_dict())
+    for q in fteacher.parameters():
+        q.requires_grad_(False)
 for m in [*student.blocks[12 - args.train_blocks:], student.norm, student.head]:
     for q in m.parameters():
         q.requires_grad_(True)
@@ -112,6 +122,14 @@ depth_ce = torch.where(rank * len(m_clean) < n_deep,
 assert (~depth_ce.isnan()).sum() == n_deep
 y_all, m_clean, delta_i, prior = y_all.to(dev), m_clean.to(dev), delta_i.to(dev), prior.to(dev)
 depth_ce = depth_ce.to(dev)
+
+# repair: retain anchors drawn in proportion to drift + its mean (the mean keeps a uniform replay share)
+r_prob = torch.ones(len(r_fit))
+if args.repair:
+    pa, pb = F.softmax(logits(teacher, r_fit) / 2, 1), F.softmax(logits(student, r_fit) / 2, 1)
+    drift = (pa * (pa.clamp_min(1e-30).log() - pb.clamp_min(1e-30).log())).sum(1)
+    r_prob = drift + drift.mean()
+    print(f"repair start: retain-fit drift {drift.mean():.4f}", flush=True)
 
 perm = torch.randperm(len(imgs), generator=torch.Generator().manual_seed(0))
 tr, ho = (perm[:2800], perm[2800:]) if args.split else (perm, perm[2800:])
@@ -173,9 +191,9 @@ t0 = time.time()
 for step in range(steps):
     idx = tr[torch.randint(len(tr), (args.bs,))].to(dev)
     v = norm(augment(to01(imgs[idx.cpu()])))
-    r = norm(augment(to01(r_fit[torch.randint(len(r_fit), (args.bs,))])))
+    r = norm(augment(to01(r_fit[torch.multinomial(r_prob, args.bs, replacement=True)])))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-        zt, rt = teacher(v).float(), teacher(r).float()
+        zt, rt = fteacher(v).float(), teacher(r).float()
     q1, q2 = forget_targets(zt, idx)
     with torch.autocast("cuda", dtype=amp_dtype or torch.float32, enabled=amp_dtype is not None):
         zs, rs = student(torch.cat([v, r])).float().split(args.bs)

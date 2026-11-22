@@ -1,0 +1,10 @@
+# Final round, one node (4 GPUs). Submit from the repo root:
+#   source scripts/_common.sh && sbatch_node_public final 04:00:00 jobs/final_round.txt
+# GPU 0: decoder verification of the best model (PixelSeal + TrustMark only, see E150)
+CMD: python -m wl.verify --id E151_verify_e143 --sources output/E143_w2_r50 output/E121_analytic_rect_v2 --kind output/E120_kind_const/kind_probs.npz --methods pixelseal trustmark
+# GPU 1: PixelSeal specialist
+configs/E145_w2_ps_only.yaml
+# GPU 2: statistical fusion (model + kind + a-contrario decoder z), cross-fitted
+CMD: python -m wl.finalize output/E143_w2_r50 --kind output/E120_kind_const/kind_probs.npz --ac-z
+# GPU 3: same without decoder z (ablation control)
+CMD: python -m wl.finalize output/E143_w2_r50 --kind output/E120_kind_const/kind_probs.npz

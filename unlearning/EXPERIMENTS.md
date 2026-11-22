@@ -246,3 +246,26 @@ Two of Astra's follow-ups were rejected locally:
 - **Class depth (`--class-depth`):** it gave the same loss moments as the margin band (2.39/3.32 against 2.41/3.34) and reassigns only 213 of the 2,100 band images, too few for a 0.01 gain.
 
 The best checkpoint is `task3/output/t3-012/soup6rep_g1.25_head1.21.pt`.
+
+## T3-013 — Img2img siblings and the final submissions
+
+### Alteration audit
+
+On unseen generated images, the original model's accuracy barely changes under moderate alterations: it stays at about 0.7 under σ=2 blur, ×0.25 downscaling and 15° rotation. The 0.3572 model compounded each alteration with forgetting. Its accuracy fell from 0.45 on clean views to 0.21–0.33. `--clean-targets --strong-aug` made altered views behave like clean ones, and it scored 0.2851 (3563), against 0.3475 for the comparable model. The hidden altered copies therefore want the recipe's view-dependent forgetting. An extra shift on altered views changed little after the pipeline and was not submitted.
+
+### Siblings
+
+`gen_siblings.py` re-renders every forget image with SDXL-Turbo img2img at strength 0.8, three times with seeds 0, 1 and 2. On the siblings the original model scores accuracy 0.644–0.664 and CE about 2.4/4.3, with max prob 0.92. That matches its behaviour on fully unseen images, so memorisation does not carry over.
+
+- **Rivals and ranking:** neighbour rivals from generated images gave a much lighter tail and were not submitted. Ranking by sibling margin (`--rank-ref`) has a rank correlation of only 0.045 with clean margin, and it scored 0.3367 (3825).
+- **Retention:** this is what worked. On siblings 3000–3499, which were held out, the 0.3572 model drifts much more than on the old proxy: T=2 KL 0.49 against 0.30, and accuracy at 0.80× the original's. Adding siblings 0–2999 to the retain pool from the start of training makes forgetting image-specific.
+
+| Submission | Candidate | Forget CE | Held-out sibling KL | Sibling acc ratio | Public score |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 3911 | One sibling set, γ=1.25, head ×1.21 | 3.66/4.50 | 0.370 | 0.838 | 0.3609 |
+| 4078 | One sibling set, γ=1.30 | 3.84/4.58 | 0.394 | 0.829 | 0.3670 |
+| 4110 | One sibling set, γ=1.35 | — | — | — | 0.3675 |
+| **4141** | **Three sibling sets, γ=1.30, head ×1.21** | **3.81/4.52** | **0.340** | **0.864** | **0.3742** |
+| 4176 | Two-seed soup of the three-set recipe, γ=1.30 | 3.91/4.51 | 0.346 | 0.858 | 0.3731 |
+
+Each model goes through the usual pipeline. It is interpolated to clean mean CE 2.40, repaired on the same retain pool, then extrapolated and given the head scale. A seed soup of the one-set recipe tied the single seed locally. The final best checkpoint is `task3/output/t3-012/s3a_g1.30_head1.21.pt`. The control set is unseen in-domain data, so siblings measure the drift the retain score sees far better than COCO or text-to-image anchors do. More sibling sets would be the next step.

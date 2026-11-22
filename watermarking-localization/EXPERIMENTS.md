@@ -271,7 +271,8 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 | 11-22 | 2 | E157g_ens_tta | 0.668 | — | refused (HTTP 429 rate limit) |
 | 11-22 | 2 | E158_verify_e157g | 0.674 | 0.6786 | best until 06:07 |
 | 11-22 | 2 | E198_final_verify | 0.674 (all-folds test members) | 0.6813 | best until 06:32 |
-| 11-22 | 2 | E198g_final_gate | 0.6816 (E198 + Rahul's size gate `--max-area-q 0.9`, `--regate`) | **0.6863** | **current best** (+0.005 public: confirms the gate, which on f0 rested on 2 images only); copy in submissions |
+| 11-22 | 2 | E198g_final_gate | 0.6816 (E198 + Rahul's size gate `--max-area-q 0.9`, `--regate`) | 0.6863 | best until 07:23 (+0.005 public: confirms the gate) |
+| 11-22 | 2 | E198g + expected-IoU decision (`wl.eiou_submit`) | 0.6866 (vs 0.6849 for the OOF-tuned post-processing of submit.sh) | **~0.69** | **current best**: parameter-free Bayes decision for the per-image mIoU replaces the post-processing fitted on f0 |
 
 ## Decisions
 

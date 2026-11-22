@@ -317,6 +317,31 @@ def _hole_fill(
     return clean_aug
 
 
+RESAMPLE_FILTERS = (Image.Resampling.BILINEAR, Image.Resampling.BICUBIC, Image.Resampling.LANCZOS)
+
+
+def resample_after_embed(
+    img_uint8: np.ndarray,
+    rng: np.random.Generator,
+    scale_range: Sequence[float] = (0.5, 0.75),
+) -> np.ndarray:
+    """Down-then-up resampling of the FINAL image, as the real data went through (E188).
+
+    PixelSeal and TrustMark embed at 256 px and upsample 2x bilinear, which leaves an exact period-2 trace (third
+    difference 0 at even columns). The real train/test images show no such trace and no periodicity at any period
+    2-16, nor a JPEG grid: they were resampled by a non-integer factor after embedding. Without this step the synthetic
+    images keep fine pixel cues that never exist at test time, and the networks partly learn the wrong evidence.
+    Geometry is preserved (back to the same size), so the mask is unchanged.
+    """
+    h, w = img_uint8.shape[:2]
+    s = float(rng.uniform(*scale_range))
+    small = (max(8, int(round(w * s))), max(8, int(round(h * s))))
+    f_down = RESAMPLE_FILTERS[int(rng.integers(len(RESAMPLE_FILTERS)))]
+    f_up = RESAMPLE_FILTERS[int(rng.integers(len(RESAMPLE_FILTERS)))]
+    pil = Image.fromarray(img_uint8).resize(small, f_down).resize((w, h), f_up)
+    return np.asarray(pil, dtype=np.uint8)
+
+
 def synthesize_one(
     clean_img: np.ndarray,
     method: str,
@@ -327,6 +352,8 @@ def synthesize_one(
     source: str = "synth",
     alt_img: np.ndarray | None = None,
     fill_probs: Sequence[float] = (1.0, 0.0, 0.0),
+    resample_prob: float = 0.0,
+    resample_range: Sequence[float] = (0.5, 0.75),
 ) -> dict[str, Any]:
     """Synthesize a single watermarked training example matching the task data generation.
 
@@ -355,6 +382,10 @@ def synthesize_one(
         img_out[y0:y1, x0:x1] = np.clip(blended, 0, 255).astype(np.uint8)
         mask512 = target_mask
 
+    if resample_prob > 0.0 and rng.random() < resample_prob:
+        img_out = resample_after_embed(img_out, rng, resample_range)
+        source = f"{source}|resampled"
+
     mask128 = downsample_mask(mask512)
     return {
         "image": img_out,
@@ -380,6 +411,8 @@ def generate_shards(
     shard_prefix: str = "shard",
     external_prob: float = 0.7,
     fill_probs: Sequence[float] = (1.0, 0.0, 0.0),
+    resample_prob: float = 0.0,
+    resample_range: Sequence[float] = (0.5, 0.75),
 ) -> list[Path]:
     """Generate compressed .npz shards following the standard training shard schema."""
     out_path = Path(out_dir)
@@ -437,6 +470,7 @@ def generate_shards(
         sample = synthesize_one(
             clean_img, method, kind, wm_models[method], mask_lib, rng,
             source=src, alt_img=alt_img, fill_probs=fill_probs,
+            resample_prob=resample_prob, resample_range=resample_range,
         )
         buf.append(sample)
         if len(buf) >= shard_size:
@@ -462,6 +496,10 @@ def main() -> None:
                     help="Share of clean bases drawn from --clean-dir (rest: scrubbed real patch images)")
     ap.add_argument("--fill-probs", type=float, nargs=3, default=[1.0, 0.0, 0.0],
                     metavar=("RESTORE", "PASTE", "INPAINT"), help="Hole fill mix for `full` images")
+    ap.add_argument("--resample-prob", type=float, default=0.0,
+                    help="Share of images resampled down-then-up after embedding (real data: all; v3 recipe: 1.0)")
+    ap.add_argument("--resample-range", type=float, nargs=2, default=[0.5, 0.75], metavar=("LO", "HI"),
+                    help="Downscale factor range of that resampling")
     args = ap.parse_args()
 
     shards = generate_shards(
@@ -478,9 +516,42 @@ def main() -> None:
         shard_prefix=args.shard_prefix,
         external_prob=args.external_prob,
         fill_probs=args.fill_probs,
+        resample_prob=args.resample_prob,
+        resample_range=args.resample_range,
     )
     print(f"Wrote {len(shards)} shards to {args.out}")
 
 
 if __name__ == "__main__":
     main()
+
+
+def period2_ratio(img_uint8: np.ndarray) -> float:
+    """Embedding trace: second differences at even vs odd columns (1.0 = no trace, ~0 = exact 2x interpolation).
+
+    Calibrate --resample-range on TRAINING images only: the synthetic images should match the real ones.
+        python -c "from wl.synth import trace_report; trace_report()"
+    """
+    g = img_uint8.astype(np.float64).mean(axis=2) if img_uint8.ndim == 3 else img_uint8.astype(np.float64)
+    d = np.abs(np.diff(g, n=2, axis=1))
+    e, o = d[:, 0::2].mean(), d[:, 1::2].mean()
+    return float(min(e, o) / max(e, o))
+
+
+def trace_report(n: int = 60, seed: int = 0) -> None:
+    """Median period-2 ratio of real training images vs one fresh embedding (PS/TM) with and without resampling."""
+    rng = np.random.default_rng(seed)
+    root = ROOT_DIR / "data" / "release" / "train"
+    meta = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+    pick = [m for m in meta if m["method"] in ("pixelseal", "trustmark")][:n]
+    real = [period2_ratio(np.asarray(Image.open(root / "images" / f"{m['image_name']}.png").convert("RGB"))) for m in pick]
+    print(f"real PS/TM train images: median period-2 ratio {np.median(real):.3f} (n={len(real)})")
+    models = load_kit_models(["pixelseal", "trustmark"], device="cpu")
+    for meth, wm in models.items():
+        imgs = [np.asarray(Image.open(root / "images" / f"{m['image_name']}.png").convert("RGB")) for m in pick[:10]]
+        raw = [wm.embed(im, rng.integers(0, 2, size=NBITS[meth])) for im in imgs]
+        print(f"{meth}: embedded {np.median([period2_ratio(x) for x in raw]):.3f}", end="")
+        for lo, hi in ((0.75, 0.95), (0.5, 0.75), (0.4, 0.6)):
+            res = [resample_after_embed(x, rng, (lo, hi)) for x in raw]
+            print(f" | resampled {lo}-{hi}: {np.median([period2_ratio(x) for x in res]):.3f}", end="")
+        print()

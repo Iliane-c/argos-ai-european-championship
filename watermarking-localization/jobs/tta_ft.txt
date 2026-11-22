@@ -1,0 +1,6 @@
+# Test-time augmentation (9 integer cell shifts, fixed set) on the best runs + fast all-folds fine-tune.
+#   source scripts/_common.sh && sbatch_node tta 02:00:00 jobs/tta_ft.txt
+CMD: python -m wl.infer --run output/E161_w8_noshift --id E161_tta
+CMD: python -m wl.infer --run output/E143_w2_r50 --id E143_tta
+CMD: python -m wl.infer --run output/E160_w8_decoder_loop --id E160_tta
+configs/E169_w8ns_allfolds_ft.yaml

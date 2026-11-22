@@ -58,7 +58,7 @@ so any split also breaks real same-model pairs. No endpoint differs from **every
 
 ## 6. Budget left (06:30, 22 Nov)
 
-44 answers on 29 endpoints, 38 on ep-05/16/09/13.
+44 answers on 29 endpoints, 38 on ep-05/16/09/13 (all spent by 10:05; see section 8).
 
 ## 7. Take-aways
 
@@ -66,6 +66,37 @@ so any split also breaks real same-model pairs. No endpoint differs from **every
 2. fp8 was never separable on ref by any probe we tried.
 3. The only signal that survived out-of-sample validation (length overrun) catches strong LoRA on the small ref model, but the larger ep model follows length limits and showed nothing.
 4. ep-28 is the one endpoint with visible degeneration, but splitting it alone (s28) did not change the public score.
+
+## 8. Morning of 22 Nov: the ep families are public models
+
+Comparing each candidate model's answer distribution on the exact ep prompts ("number 1–100", "animal", computed locally, 0 queries)
+with each family's observed answers (`exp4/base_models/id_pref.py`, logs `id_pref*.log`):
+
+| Family | Base model | TV number | TV animal | Model's favourites = family's favourites |
+|---|---|---|---|---|
+| X | **Qwen2.5-3B-Instruct** | 0.16 | 0.18 | 27, 37, 87 / penguin, kangaroo, leopard |
+| Y | **Qwen2.5-1.5B-Instruct** | 0.15 | 0.14 | 73, 67, 74 / lion, monkey, fox |
+| Z | **Llama-3.2-1B-Instruct** | 0.24 | 0.17 | 14, 73 / giraffe, eagle |
+
+Ruled out: Qwen2.5-0.5B, Phi-3.5-mini, SmolLM2-360M/1.7B, Llama-3.2-3B, gemma-2-2b. The ref endpoints are SmolLM2-360M-Instruct.
+Per-endpoint fits (`id_endpoint.py`) put ep-06 and ep-20 with Qwen2.5-1.5B, ep-04 / ep-02 / ep-23 with Qwen2.5-3B, ep-10 with Llama-3.2-1B.
+
+**Null range for disguises** (`id_null.py`, `id_null2*.py`): each base model was run locally with system prompts / personas and
+temperatures 0.7–1.2, sampled at the ep sample size, to get how low a same-model endpoint's log-likelihood can go.
+With 20 answers only ep-02 (animal) fell below it; after spending the last 570 ep queries on the number prompt
+(`exp4/home_me_work/ep_num_final.jsonl`, ~36 number answers per endpoint) **no endpoint falls below the range**.
+So the available data cannot separate fp8 / LoRA variants from disguises, consistent with every ref test.
+
+Late submissions (all public 0.10, files in `ep1/queue/final/`):
+
+| File | Idea |
+|---|---|
+| s08, s05 | single splits |
+| v7 | outliers merged into their base-model family (X+04+{02,23}, Y+06+20, Z+10), each its own model |
+| v9 | v7 + ep-02 split from ep-23 (the only endpoint below the disguise range at 20 answers) |
+| v10 | v7 + ep-30 alone, {05,16} together (lottery, no evidence) |
+
+ep budget at the end: 0 on every endpoint.
 
 ## Where things are
 

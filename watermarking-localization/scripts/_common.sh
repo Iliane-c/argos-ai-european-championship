@@ -39,7 +39,7 @@ require_cmd() {
 # Cluster rule (organisers, 22 Nov): the WHOLE TEAM may have at most ONE job at a time,
 # running or queued, reservation or public queue alike (every job = one exclusive 4-GPU node).
 # squeue -u $USER cannot see teammates, so list every team member here.
-TEAM_USERS="${TEAM_USERS:-chikhaoui1,chander2}"
+TEAM_USERS="${TEAM_USERS:-chikhaoui1,chander2,chen67}"
 team_guard() {
     require_cmd squeue
     local n

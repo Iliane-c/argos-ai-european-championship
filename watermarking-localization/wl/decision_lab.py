@@ -92,6 +92,7 @@ def main() -> None:
     ap.add_argument("--kind", required=True)
     ap.add_argument("--samples", type=int, default=256)
     ap.add_argument("--write", default=None, choices=RULES)
+    ap.add_argument("--ref", default=None, help="reference run (e.g. the submitted E198g): paired eiou (ratio) comparison")
     args = ap.parse_args()
     run = Path(args.run)
     meta, masks = load_train_ground_truth(ROOT_DIR / "data" / "release")
@@ -112,6 +113,19 @@ def main() -> None:
         for kd in ("full", "patch"):
             s = (meth == m) & (kinds == kd)
             print(f"   {METHOD_SHORT[m]} {kd:5s} " + "  ".join(f"{r}={sc[r][s].mean():.4f}" for r in RULES))
+    if args.ref:
+        r_names, r_probs = load_probs(Path(args.ref) / "val_probs.npz")
+        rp = {str(n): p for n, p in zip(r_names, r_probs)}
+        ref = np.array([miou_batch(decide(rp[n], kind[n], "ratio", args.samples, rng)[None], g[None])[0]
+                        for n, g in zip(names, gts)])
+        print(f"   paired vs {Path(args.ref).name} (ratio = eiou decision, ref {ref.mean():.4f}):")
+        bs = np.random.default_rng(1)
+        for r in RULES:
+            d = sc[r] - ref
+            boot = np.array([d[bs.integers(0, len(d), len(d))].mean() for _ in range(2000)])
+            per = "  ".join(f"{METHOD_SHORT[m]} {d[meth == m].mean():+.4f}" for m in METHODS)
+            print(f"   {r:10s} {sc[r].mean():.4f}  diff {d.mean():+.4f} CI95 [{np.quantile(boot, .025):+.4f}, {np.quantile(boot, .975):+.4f}]"
+                  f"  wins {int((d > 1e-6).sum())} / losses {int((d < -1e-6).sum())}  | {per}")
     if args.write:
         test_meta = json.loads((ROOT_DIR / "data" / "release" / "test" / "metadata.json").read_text(encoding="utf-8"))
         order = [r["image_name"] for r in test_meta]

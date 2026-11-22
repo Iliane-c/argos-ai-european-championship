@@ -18,6 +18,9 @@ Options for the follow-up experiments:
                     towards --depth-lo..--depth-hi by hardness; KL alone stalls once target p_true is ~0
   --repair CKPT     retention repair: start from CKPT, pin forget views to CKPT's own frozen outputs and
                     sample retain anchors in proportion to their drift (use with --delta 0 --train-blocks 1)
+  --clean-targets   build every view's forget target from the teacher's clean-image logits, so the student is
+                    view-invariant like a model that never saw the image (needs no --repair)
+  --strong-aug      add rotation up to 20 deg, down/up resampling, stronger blur and brightness to the views
   --split           train on 80% of the forget set, report the held-out 20% (leakage check)
 """
 import argparse
@@ -54,6 +57,8 @@ p.add_argument("--depth-hi", type=float, default=10.0)
 p.add_argument("--class-depth", action="store_true", help="Allocate the 60%% depth band across the nine near-cap classes and the remaining classes")
 p.add_argument("--crop-weight", type=float, default=0.0, help="During repair, anchor stable center-crop CE to the parent clean CE")
 p.add_argument("--repair", type=Path)
+p.add_argument("--clean-targets", action="store_true")
+p.add_argument("--strong-aug", action="store_true")
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
 p.add_argument("--seed", type=int, default=0)
@@ -61,6 +66,8 @@ args = p.parse_args()
 
 if args.class_depth and (args.depth_frac != 0.6 or args.depth_weight <= 0 or args.split):
     p.error("--class-depth requires the full forget set, --depth-frac 0.6 and positive --depth-weight")
+if args.clean_targets and args.repair:
+    p.error("--clean-targets builds targets from the original teacher; it cannot be combined with --repair")
 if args.crop_weight and (args.crop_weight < 0 or not args.repair or args.delta != 0 or args.target_scale != 1):
     p.error("--crop-weight requires repair with --delta 0 and --target-scale 1")
 
@@ -113,6 +120,7 @@ def true_margin(z, y):
 
 
 z0 = logits(teacher, imgs)
+z0_dev = z0.to(dev)
 y_all = z0.argmax(1)
 m_clean = true_margin(z0, y_all).clamp_min(1e-3)
 delta_i = args.delta * (m_clean / m_clean.median()) ** args.margin_power
@@ -168,14 +176,29 @@ def augment(x):
     th[:, 0, 0] = s * flip; th[:, 1, 1] = s
     th[:, 0, 2] = (torch.rand(B, device=dev) * 2 - 1) * (1 - s)
     th[:, 1, 2] = (torch.rand(B, device=dev) * 2 - 1) * (1 - s)
+    if args.strong_aug:  # rotate half the views by up to 20 degrees
+        a = torch.empty(B, device=dev).uniform_(-20, 20).deg2rad() * (torch.rand(B, device=dev) < 0.5)
+        rot = torch.stack([torch.stack([a.cos(), -a.sin()], 1), torch.stack([a.sin(), a.cos()], 1)], 1)
+        th[:, :, :2] = rot @ th[:, :, :2]
     v = F.grid_sample(x, F.affine_grid(th, x.shape, align_corners=False), mode="bilinear",
                       padding_mode="reflection", align_corners=False)
     blur = torch.rand(B, device=dev) < 0.3
     if blur.any():
         k = torch.tensor([1., 4., 6., 4., 1.], device=dev); k = (k[:, None] * k[None]) / 256
         v[blur] = F.conv2d(F.pad(v[blur], (2, 2, 2, 2), mode="reflect"), k.expand(3, 1, 5, 5), groups=3)
+        if args.strong_aug:  # a third of the blurred views get two more passes (about sigma 2)
+            more = blur & (torch.rand(B, device=dev) < 0.33)
+            for _ in range(2):
+                v[more] = F.conv2d(F.pad(v[more], (2, 2, 2, 2), mode="reflect"), k.expand(3, 1, 5, 5), groups=3)
+    if args.strong_aug:  # down/up resampling to 56-112 px
+        down = torch.rand(B, device=dev) < 0.25
+        if down.any():
+            sz = int(torch.randint(56, 113, (1,)))
+            v[down] = F.interpolate(F.interpolate(v[down], size=sz, mode="bilinear", antialias=True),
+                                    size=224, mode="bilinear", align_corners=False)
     col = torch.rand(B, device=dev) < 0.5
-    b = torch.empty(B, 1, 1, 1, device=dev).uniform_(0.8, 1.2)
+    lo_b, hi_b = (0.6, 1.4) if args.strong_aug else (0.8, 1.2)
+    b = torch.empty(B, 1, 1, 1, device=dev).uniform_(lo_b, hi_b)
     c = torch.empty(B, 1, 1, 1, device=dev).uniform_(0.8, 1.2)
     m = v.mean((1, 2, 3), keepdim=True)
     v = torch.where(col[:, None, None, None], ((v - m) * c + m) * b, v)
@@ -223,6 +246,8 @@ for step in range(steps):
     r = norm(augment(to01(r_fit[torch.multinomial(r_prob, args.bs, replacement=True)])))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
         zt, rt = fteacher(v).float(), teacher(r).float()
+    if args.clean_targets:
+        zt = z0_dev[idx]
         if args.crop_weight:
             stable = teacher(v[:ncrop]).argmax(1) == y_all[idx[:ncrop]]
     q1, q2 = forget_targets(zt, idx)

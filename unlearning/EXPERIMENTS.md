@@ -226,3 +226,23 @@ With the sharper, deeper targets the strength optimum moved to γ≈1.35 after r
 - **Stronger repair (4 epochs, weight 5):** at matched mean it had std 3.88 and retain KL 0.333, so the retention it gained came back out of forgetting.
 
 Option 3 of `NEXT_APPROACHES.md` (spreading rival mass) was not run, because both earlier softening attempts lowered the score. Options 2 and 5 did not fit the remaining time. The best checkpoint is `task3/output/t3-012/dep6rep_g1.35.pt`.
+
+### Head scaling and seed soup (after 0.3044)
+
+Astra's submission 3329 took the repaired 60% model at γ=1.20 and multiplied both head tensors by 1.21, which sharpens every logit. It scored 0.3475. At almost the same clean mean CE (3.57 against 3.53), the loss std rose from 3.92 to 4.51 and retain KL fell from 0.336 to 0.291. The original model on unseen generated images has std 4.72.
+
+| Submission | Candidate | Clean CE mean/std | Retain KL | Public score |
+| --- | --- | ---: | ---: | ---: |
+| 3329 | 60% band, γ=1.20, head ×1.21 (Astra) | 3.57/4.51 | 0.291 | 0.3475 |
+| 3364 | 60% band, γ=1.10, head ×1.35 | 3.46/4.75 | 0.303 | 0.3266 |
+| 3396 | Three-seed soup, γ=1.20, head ×1.21 | 3.56/4.39 | 0.278 | 0.3487 |
+| **3427** | **Three-seed soup, γ=1.25, head ×1.21** | **3.76/4.49** | **0.295** | **0.3572** |
+
+The soup averages the unrepaired 60% runs with seeds 0, 1 and 2. It is interpolated to mean CE 2.40 (γ=1.28), repaired, then exported at the listed γ and head scale. Extra sharpening beyond about ×1.2 lowered the score, likely because the prediction score compares with an averaged, softer gold distribution.
+
+Two of Astra's follow-ups were rejected locally:
+
+- **Crop repair (`--crop-weight 0.5`):** applied to the soup, it lowered loss on every view (clean 3.42 to 3.28, off-center 2.60 to 2.48) instead of correcting crops alone.
+- **Class depth (`--class-depth`):** it gave the same loss moments as the margin band (2.39/3.32 against 2.41/3.34) and reassigns only 213 of the 2,100 band images, too few for a 0.01 gain.
+
+The best checkpoint is `task3/output/t3-012/soup6rep_g1.25_head1.21.pt`.

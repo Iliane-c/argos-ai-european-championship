@@ -51,11 +51,18 @@ p.add_argument("--depth-weight", type=float, default=0.0)
 p.add_argument("--depth-frac", type=float, default=0.1)
 p.add_argument("--depth-lo", type=float, default=6.0)
 p.add_argument("--depth-hi", type=float, default=10.0)
+p.add_argument("--class-depth", action="store_true", help="Allocate the 60%% depth band across the nine near-cap classes and the remaining classes")
+p.add_argument("--crop-weight", type=float, default=0.0, help="During repair, anchor stable center-crop CE to the parent clean CE")
 p.add_argument("--repair", type=Path)
 p.add_argument("--split", action="store_true")
 p.add_argument("--amp", choices=["bf16", "fp16", "fp32"], default="bf16", help="fp16 on Turing (no bf16)")
 p.add_argument("--seed", type=int, default=0)
 args = p.parse_args()
+
+if args.class_depth and (args.depth_frac != 0.6 or args.depth_weight <= 0 or args.split):
+    p.error("--class-depth requires the full forget set, --depth-frac 0.6 and positive --depth-weight")
+if args.crop_weight and (args.crop_weight < 0 or not args.repair or args.delta != 0 or args.target_scale != 1):
+    p.error("--crop-weight requires repair with --delta 0 and --target-scale 1")
 
 dev = "cuda"
 torch.manual_seed(args.seed)
@@ -119,7 +126,22 @@ n_deep = int(args.depth_frac * len(m_clean))
 depth_ce = torch.where(rank * len(m_clean) < n_deep,
                        args.depth_hi - (args.depth_hi - args.depth_lo) * rank * len(m_clean) / max(n_deep - 1, 1),
                        torch.tensor(float("nan")))
+if args.class_depth:
+    counts = y_all.bincount(minlength=100)
+    near_cap = counts[y_all] >= 129
+    if int((counts >= 129).sum()) != 9:
+        raise ValueError("Unexpected forget-class counts for the nine-class experiment")
+    order = m_clean.argsort()
+    quota = round(0.8 * int(near_cap.sum()))
+    selected = torch.cat([order[near_cap[order]][:quota], order[~near_cap[order]][:n_deep - quota]])
+    selected = selected[m_clean[selected].argsort()]
+    targets = depth_ce[depth_ce.isfinite()].sort(descending=True).values
+    depth_ce.fill_(float("nan"))
+    depth_ce[selected] = targets
+    print(f"Depth allocation: {quota} near-cap, {n_deep - quota} other", flush=True)
 assert (~depth_ce.isnan()).sum() == n_deep
+if args.crop_weight:
+    parent_clean_ce = F.cross_entropy(logits(fteacher, imgs), y_all, reduction="none").to(dev)
 y_all, m_clean, delta_i, prior = y_all.to(dev), m_clean.to(dev), delta_i.to(dev), prior.to(dev)
 depth_ce = depth_ce.to(dev)
 
@@ -128,7 +150,9 @@ r_prob = torch.ones(len(r_fit))
 if args.repair:
     pa, pb = F.softmax(logits(teacher, r_fit) / 2, 1), F.softmax(logits(student, r_fit) / 2, 1)
     drift = (pa * (pa.clamp_min(1e-30).log() - pb.clamp_min(1e-30).log())).sum(1)
-    r_prob = drift + drift.mean()
+    drift = drift.clamp_min(0)
+    if drift.max() > 0:
+        r_prob = drift + drift.mean()
     print(f"repair start: retain-fit drift {drift.mean():.4f}", flush=True)
 
 perm = torch.randperm(len(imgs), generator=torch.Generator().manual_seed(0))
@@ -190,14 +214,25 @@ student.train()
 t0 = time.time()
 for step in range(steps):
     idx = tr[torch.randint(len(tr), (args.bs,))].to(dev)
-    v = norm(augment(to01(imgs[idx.cpu()])))
+    clean = to01(imgs[idx.cpu()])
+    v = norm(augment(clean))
+    if args.crop_weight:
+        ncrop = max(1, len(idx) // 2)
+        v[:ncrop] = norm(F.interpolate(clean[:ncrop, :, 16:-16, 16:-16], size=(224, 224),
+                                       mode="bilinear", align_corners=False))
     r = norm(augment(to01(r_fit[torch.multinomial(r_prob, args.bs, replacement=True)])))
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
         zt, rt = fteacher(v).float(), teacher(r).float()
+        if args.crop_weight:
+            stable = teacher(v[:ncrop]).argmax(1) == y_all[idx[:ncrop]]
     q1, q2 = forget_targets(zt, idx)
     with torch.autocast("cuda", dtype=amp_dtype or torch.float32, enabled=amp_dtype is not None):
         zs, rs = student(torch.cat([v, r])).float().split(args.bs)
     loss = kd(q1, zs, 1.0) + kd(q2, zs, 2.0) + args.retain_weight * kd(F.softmax(rt / 2, 1), rs, 2.0)
+    if args.crop_weight:
+        crop_ce = F.cross_entropy(zs[:ncrop], y_all[idx[:ncrop]], reduction="none")
+        error = F.smooth_l1_loss(crop_ce, parent_clean_ce[idx[:ncrop]], reduction="none")
+        loss = loss + args.crop_weight * (error * stable).mean()
     # shortcut: depth loss applies to every augmented view, blur included; restrict to mild views if blur tails overshoot
     if args.depth_weight > 0:
         tgt = depth_ce[idx]; deep = ~tgt.isnan()
@@ -241,6 +276,14 @@ def report(name, ids, view=lambda x: x, u8=None):
 
 
 ev = tr[:700]
+if args.crop_weight:
+    def audit_crop(x):
+        return F.interpolate(x[:, :, 8:208, 18:218], size=(224, 224), mode="bilinear", align_corners=False)
+
+    for name, view in [("clean", lambda x: x), ("off-center", audit_crop), ("blur", blur5)]:
+        for label, model in [("parent", fteacher), ("student", student)]:
+            ce = F.cross_entropy(logits(model, imgs[ev], view), y_all[ev].cpu(), reduction="none")
+            print(f"{label} {name} CE {ce.mean():.3f}/{ce.std():.3f}")
 report("forget clean", ev)
 report("forget blur5", ev, blur5)
 report("forget jpeg70", ev[:384], u8=jpeg(imgs[ev[:384]]))

@@ -187,3 +187,20 @@ On unseen in-domain images (the generated set), the original model is bimodal: i
 | — | Target scale 2.5, δ=20 | 1.56/1.78 at γ=1.2 | not submitted |
 
 Sharpening is the largest single gain since the first non-zero score. With sharper targets the strength optimum moved up: mean CE about 1.95 beats 1.6, unlike the soft-target runs. δ=20 was rejected locally because at a matched mean it lowers the loss std (1.78 versus 2.17) and raises retain drift, so it flips more images instead of making the flipped ones deeper. The best checkpoint is `task3/output/t3-012/ts25_g1.5.pt`. The remaining gap to the unseen-image shape is the depth of the wrong images: their true-class probability is 0.095 versus 0.046, and the loss tail reaches about 6 instead of 13. Scale 4 is training locally. `ssh_t3012.sh` sweeps δ=8, margin power −5, and 12 epochs at scales 2.5 and 4 on the server, with γ 1.4–2.0.
+
+### Depth loss and retention repair (Astra's options 1 and 4)
+
+The T3-012 scores up to here were 0.1930 at γ=1.5 (2671) and 0.2088 at γ=1.7 (2701), both at scale 2.5. Sharper targets moved the strength optimum up.
+
+`--depth-weight` adds a Huber loss on the student's per-image CE for the hardest `--depth-frac` of forget images, ranked by clean margin, with targets from `--depth-hi` (hardest) down to `--depth-lo`=6. KL distillation alone stalls once the target's true-class probability is near zero. `--repair CKPT` then fine-tunes the last block and head starting from the chosen checkpoint. It pins forget views to that checkpoint's frozen outputs (`--delta 0`) and samples generated and COCO anchors in proportion to their drift, at retention weight 3 for 2 epochs with lr 1e-5. A final γ=1.03 restores the slight loss of forget strength. All runs use scale 2.5 and margin power −3. Retain KL is the drift on the last 500 retain-mix images.
+
+| Candidate | Clean CE mean/std | Hardest 10% mean CE | Forget KL | Retain KL | Public score |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Scale 2.5, γ=1.7 (2701) | 2.34/2.57 | 4.99 | 1.81 | 0.297 | 0.2088 |
+| Depth 10% (6–10), γ=1.6 | 2.38/2.79 | about 6.0 | 1.75 | 0.277 | — |
+| Depth 20% (6–12), γ=1.5 | 2.39/2.99 | 6.18 | 1.69 | 0.257 | — |
+| **Depth 20% + repair, γ=1.03 (2898)** | **2.42/3.01** | **6.11** | **1.71** | **0.246** | **0.2431** |
+| Depth 30% (6–13) + repair, γ=1.03 | 2.40/3.11 | — | 1.64 | 0.231 | — |
+| Depth 40% (6–14) + repair, γ=1.03 | 2.40/3.21 | — | 1.60 | 0.221 | — |
+
+At matched mean CE, each wider band raised the loss std and lowered drift, but the std gain fell from +0.2 to +0.1 per step. The gold models' std is unknown, so only the leaderboard can show where widening stops paying. Checkpoints are in `task3/output/t3-012/`.

@@ -10,7 +10,9 @@
 #
 # Usage:
 #   [WAIT_FOR=<jobid>] ./scripts/runs/round_v2.sh   # login node: download COCO val2017 if missing, queue the chain
-#   ./scripts/runs/round_v2.sh --post   # what job 3 runs on the GPU node
+#   ./scripts/runs/round_v2.sh --coco               # login node: only download COCO val2017
+#   ./scripts/runs/round_v2.sh --all                # inside ONE 4-GPU job: synth, training and post in a row
+#   ./scripts/runs/round_v2.sh --post               # what job 3 runs on the GPU node
 
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/_common.sh"
@@ -77,11 +79,19 @@ PY
     cat output/round_v2_summary.txt
 }
 
-submit_chain() {
-    require_cmd sbatch
-    mkdir -p output/logs output/manifests
+synth_complete() {
+    local per_worker=$(( (SYNTH_PER_METHOD + SLURM_NODE_GPUS - 1) / SLURM_NODE_GPUS ))
+    SYNTH_EXPECTED=$(( SLURM_NODE_GPUS * ((per_worker * 3 + SHARD_SIZE - 1) / SHARD_SIZE) ))
+    SYNTH_HAVE="$(find data/synth/v2 -name '*.npz' 2>/dev/null | wc -l || true)"
+    [[ "$SYNTH_HAVE" -ge "$SYNTH_EXPECTED" ]]
+}
 
-    if [[ "$(find "$CLEAN_DIR" -name '*.jpg' 2>/dev/null | wc -l || true)" -lt 4000 ]]; then
+coco_complete() {
+    [[ "$(find "$CLEAN_DIR" -name '*.jpg' 2>/dev/null | wc -l || true)" -ge 4000 ]]
+}
+
+fetch_coco() {
+    if ! coco_complete; then
         echo "[1/4] Downloading COCO val2017 (780 MB) -> $CLEAN_DIR"
         rm -rf "$CLEAN_DIR"; mkdir -p data/clean
         curl -sSfL --retry 5 -o data/clean/val2017.zip http://images.cocodataset.org/zips/val2017.zip
@@ -89,6 +99,32 @@ submit_chain() {
     else
         echo "[1/4] $CLEAN_DIR present ($(ls "$CLEAN_DIR" | wc -l) images)"
     fi
+}
+
+# Everything inside the current 4-GPU job (compute nodes have no internet: fetch COCO first on a login node).
+run_all() {
+    activate_venv
+    export SLURM_SUBMIT_DIR="$ROOT_DIR"   # jobs/run_node.sh resolves the repo from it
+    mkdir -p output/logs output/manifests
+    coco_complete || { echo "ERROR: $CLEAN_DIR missing. On a login node run: ./scripts/runs/round_v2.sh --coco" >&2; exit 1; }
+    if synth_complete; then
+        echo "[$(date +%H:%M)] synth-v2 complete ($SYNTH_HAVE shards), skipping"
+    else
+        rm -rf data/synth/v2
+        echo "[$(date +%H:%M)] synth-v2"
+        RUN_LOCAL=1 ./scripts/prep/generate_synth.sh v2 "$SYNTH_PER_METHOD" "$SHARD_SIZE" - "$CLEAN_DIR"
+        synth_complete || { echo "ERROR: synth-v2 incomplete ($SYNTH_HAVE of $SYNTH_EXPECTED shards), see output/logs/task*" >&2; exit 1; }
+    fi
+    echo "[$(date +%H:%M)] training E170-E173 (one per GPU; logs: output/logs/<id>_${SLURM_JOB_ID:-local}.log)"
+    ./jobs/run_node.sh "${CONFIGS[@]}" || echo "some models failed; post uses the ones that finished"
+    echo "[$(date +%H:%M)] refine + ensemble"
+    post
+}
+
+submit_chain() {
+    require_cmd sbatch
+    mkdir -p output/logs output/manifests
+    fetch_coco
 
     # Wait for your own jobs and WAIT_FOR (one node per team).
     local team_jobs dep=""
@@ -100,15 +136,11 @@ submit_chain() {
     echo "      partner's jobs are not seen; pass them as WAIT_FOR=<id>. Team account view:"
     squeue -A "$SLURM_ACCOUNT" --reservation="$SLURM_RESERVATION" -o '      %.10i %.10u %.20j %.8T %.10M' || true
 
-    local per_worker=$(( (SYNTH_PER_METHOD + SLURM_NODE_GPUS - 1) / SLURM_NODE_GPUS ))
-    local expected=$(( SLURM_NODE_GPUS * ((per_worker * 3 + SHARD_SIZE - 1) / SHARD_SIZE) ))
-    local have
-    have="$(find data/synth/v2 -name '*.npz' 2>/dev/null | wc -l || true)"
     local synth_id=""
-    if [[ "$have" -ge "$expected" ]]; then
-        echo "[2/4] synth-v2 complete ($have shards), skipping"
+    if synth_complete; then
+        echo "[2/4] synth-v2 complete ($SYNTH_HAVE shards), skipping"
     else
-        [[ "$have" -gt 0 ]] && echo "      removing incomplete synth-v2 ($have of $expected shards)" && rm -rf data/synth/v2
+        [[ "$SYNTH_HAVE" -gt 0 ]] && echo "      removing incomplete synth-v2 ($SYNTH_HAVE of $SYNTH_EXPECTED shards)" && rm -rf data/synth/v2
         set_dep "$dep"
         synth_id="$(./scripts/prep/generate_synth.sh v2 "$SYNTH_PER_METHOD" "$SHARD_SIZE" 01:00:00 "$CLEAN_DIR" \
             | awk '/Submitted batch job/ {print $4}')"
@@ -158,8 +190,10 @@ sbatch_gpu_node() {
         --wrap="cd '$ROOT_DIR' && $cmd"
 }
 
-if [[ "${1:-}" == "--post" ]]; then
-    post
-else
-    submit_chain
-fi
+case "${1:-}" in
+    --post) post ;;
+    --all) run_all ;;
+    --coco) fetch_coco ;;
+    "") submit_chain ;;
+    *) echo "Unknown option: $1 (use --all, --coco, --post or nothing)" >&2; exit 1 ;;
+esac

@@ -122,6 +122,15 @@ if [[ "$DEVICE" == "auto" ]]; then
     DEVICE="$("$PY" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')")"
 fi
 
+NGPUS="${NGPUS:-auto}"
+if [[ "$NGPUS" == "auto" ]]; then
+    if [[ "$DEVICE" == cuda* ]]; then
+        NGPUS="$("$PY" -c "import torch; print(max(1, torch.cuda.device_count()))")"
+    else
+        NGPUS="1"
+    fi
+fi
+
 if [[ "$AMP" == "auto" ]]; then
     if [[ "$DEVICE" == cuda* ]]; then
         AMP="$("$PY" -c "import torch; print('bf16' if torch.cuda.is_bf16_supported() else 'fp16')")"
@@ -206,7 +215,7 @@ echo " REPO_DIR     : $REPO_UNLEARNING_DIR"
 echo " TASK_DIR     : $TASK_DIR"
 echo " OUT_DIR      : $OUT_DIR"
 echo " MODE         : $MODE (STAGES=$STAGES, USE_INDOMAIN=$USE_INDOMAIN, SKIP_SHADOW=$SKIP_SHADOW, FORCE=$FORCE)"
-echo " DEVICE/AMP   : $DEVICE / $AMP"
+echo " DEVICE/AMP   : $DEVICE (${NGPUS}x GPU) / $AMP"
 echo " PYTHON       : $PY"
 echo "=================================================================="
 
@@ -329,7 +338,7 @@ if stage_enabled diagnose; then
 fi
 
 # ---------------------------------------------------------------------------
-# Stage 0.5: In-Domain 45-Class Retain Generation (SDXL-Turbo)
+# Stage 0.5: In-Domain 45-Class Retain Generation (SDXL-Turbo, Multi-GPU Sharded)
 # ---------------------------------------------------------------------------
 INDOMAIN_FILE="${INDOMAIN_FILE:-$OUT_DIR/pools/gen_indomain.npy}"
 if [[ ! -f "$INDOMAIN_FILE" ]]; then
@@ -344,12 +353,66 @@ fi
 if stage_enabled indomain && [[ "$USE_INDOMAIN" == "1" ]] && [[ "$INDOMAIN_PER_CLASS" -gt 0 ]]; then
     mkdir -p "$(dirname "$INDOMAIN_FILE")"
     if needs_run "$INDOMAIN_FILE"; then
-        echo ""
-        echo ">>> [Stage 0.5/6] Generate In-Domain 45-Class Retain Anchors (gen_indomain.py, per_class=$INDOMAIN_PER_CLASS)"
-        ensure_indomain_deps
-        run_ul gen_indomain.py \
-            --out "$INDOMAIN_FILE" \
-            --per-class "$INDOMAIN_PER_CLASS"
+        if [[ -f "$TASK_DIR/gen0.npy" && -f "$TASK_DIR/gen1.npy" && "$FORCE" != "1" ]]; then
+            echo ""
+            echo ">>> [Stage 0.5/6] Found existing T3-011 shards ($TASK_DIR/gen0.npy + gen1.npy); merging into $INDOMAIN_FILE"
+            "$PY" - "$TASK_DIR/gen0.npy" "$TASK_DIR/gen1.npy" "$INDOMAIN_FILE" <<'PY'
+import sys, numpy as np
+from pathlib import Path
+g0, g1, out_p = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+arr = np.concatenate([np.load(g0), np.load(g1)], axis=0)
+np.save(out_p, arr)
+l0, l1 = g0.with_suffix(".labels.npy"), g1.with_suffix(".labels.npy")
+if l0.is_file() and l1.is_file():
+    np.save(out_p.with_suffix(".labels.npy"), np.concatenate([np.load(l0), np.load(l1)], axis=0))
+print("Merged shards ->", out_p, arr.shape)
+PY
+        elif [[ "$NGPUS" -gt 1 ]]; then
+            echo ""
+            echo ">>> [Stage 0.5/6] Generate In-Domain 45-Class Anchors across ${NGPUS} GPUs (per_class=$INDOMAIN_PER_CLASS)"
+            ensure_indomain_deps
+            SHARD_DIR="$(dirname "$INDOMAIN_FILE")/shards"
+            mkdir -p "$SHARD_DIR"
+            PIDS=()
+            for ((s=0; s<NGPUS; s++)); do
+                CUDA_VISIBLE_DEVICES="$s" PYTHONPATH="$REPO_UNLEARNING_DIR:$TASK_DIR:${PYTHONPATH:-}" \
+                    "$PY" -u "$REPO_UNLEARNING_DIR/gen_indomain.py" \
+                    --out "$SHARD_DIR/shard_${s}.npy" \
+                    --per-class "$INDOMAIN_PER_CLASS" \
+                    --shard "$s" \
+                    --nshards "$NGPUS" \
+                    --batch "${INDOMAIN_BATCH:-16}" > "$SHARD_DIR/shard_${s}.log" 2>&1 &
+                PIDS+=("$!")
+            done
+            FAIL=0
+            for pid in "${PIDS[@]}"; do
+                wait "$pid" || FAIL=1
+            done
+            if [[ "$FAIL" -ne 0 ]]; then
+                cat "$SHARD_DIR"/shard_*.log >&2 || true
+                echo "ERROR: Multi-GPU gen_indomain.py failed." >&2
+                exit 1
+            fi
+            "$PY" - "$SHARD_DIR" "$NGPUS" "$INDOMAIN_FILE" <<'PY'
+import sys, numpy as np
+from pathlib import Path
+sdir, n, out_p = Path(sys.argv[1]), int(sys.argv[2]), Path(sys.argv[3])
+imgs = [np.load(sdir / f"shard_{s}.npy") for s in range(n)]
+lbls = [np.load(sdir / f"shard_{s}.labels.npy") for s in range(n)]
+arr = np.concatenate(imgs, axis=0)
+np.save(out_p, arr)
+np.save(out_p.with_suffix(".labels.npy"), np.concatenate(lbls, axis=0))
+print(f"Merged {n} shards -> {out_p} {arr.shape}")
+PY
+        else
+            echo ""
+            echo ">>> [Stage 0.5/6] Generate In-Domain 45-Class Retain Anchors (gen_indomain.py, per_class=$INDOMAIN_PER_CLASS)"
+            ensure_indomain_deps
+            run_ul gen_indomain.py \
+                --out "$INDOMAIN_FILE" \
+                --per-class "$INDOMAIN_PER_CLASS" \
+                --batch "${INDOMAIN_BATCH:-16}"
+        fi
     else
         echo ">>> [Stage 0.5/6] in-domain anchors already exist at $INDOMAIN_FILE (set FORCE=1 to rerun)"
     fi
@@ -464,8 +527,68 @@ SHARED_OPT=()
 [[ "$SKIP_SHADOW" != "1" && -f "$SHADOW_GOLD" ]] && SHARED_OPT+=(--shadow-gold "$SHADOW_GOLD")
 
 # ---------------------------------------------------------------------------
-# Stage 4: Wave 1 — Surgical Last-K Unlearning Branches (55-Class Frozen Head)
+# Stage 4 & 5: Wave 1 + Wave 2 — Multi-GPU Parallel Branch Scheduler
 # ---------------------------------------------------------------------------
+BRANCH_QUEUE_NAMES=()
+BRANCH_QUEUE_CMDS=()
+
+enqueue_branch() {
+    local bname="$1"
+    shift
+    BRANCH_QUEUE_NAMES+=("$bname")
+    local serialized
+    printf -v serialized '%q ' "$@"
+    BRANCH_QUEUE_CMDS+=("$serialized")
+}
+
+flush_branch_queue() {
+    local total="${#BRANCH_QUEUE_CMDS[@]}"
+    [[ "$total" -eq 0 ]] && return 0
+    if [[ "$NGPUS" -le 1 || "$total" -eq 1 ]]; then
+        for ((i=0; i<total; i++)); do
+            echo ""
+            echo ">>> Running ${BRANCH_QUEUE_NAMES[$i]} on $DEVICE"
+            eval "${BRANCH_QUEUE_CMDS[$i]}"
+        done
+    else
+        mkdir -p "$OUT_DIR/logs"
+        echo ""
+        echo ">>> Running $total unlearning branches across $NGPUS GPUs in parallel (logs in $OUT_DIR/logs/) ..."
+        local idx=0
+        while [[ "$idx" -lt "$total" ]]; do
+            local pids=()
+            local batch_names=()
+            local batch_logs=()
+            for ((g=0; g<NGPUS && idx<total; g++, idx++)); do
+                local bname="${BRANCH_QUEUE_NAMES[$idx]}"
+                local blog="$OUT_DIR/logs/${bname}.log"
+                echo "  [GPU $g] starting $bname -> $blog"
+                (
+                    export CUDA_VISIBLE_DEVICES="$g"
+                    eval "${BRANCH_QUEUE_CMDS[$idx]}"
+                ) > "$blog" 2>&1 &
+                pids+=("$!")
+                batch_names+=("$bname")
+                batch_logs+=("$blog")
+            done
+            local fail=0
+            for ((k=0; k<${#pids[@]}; k++)); do
+                if wait "${pids[$k]}"; then
+                    echo "  [DONE] ${batch_names[$k]}"
+                    tail -n 4 "${batch_logs[$k]}" | sed 's/^/    /'
+                else
+                    echo "  [FAIL] ${batch_names[$k]} (see ${batch_logs[$k]})" >&2
+                    tail -n 30 "${batch_logs[$k]}" >&2 || true
+                    fail=1
+                fi
+            done
+            [[ "$fail" -ne 0 ]] && exit 1
+        done
+    fi
+    BRANCH_QUEUE_NAMES=()
+    BRANCH_QUEUE_CMDS=()
+}
+
 if stage_enabled wave1; then
     mkdir -p "$OUT_DIR/wave1_last6" "$OUT_DIR/wave1_last5_patch"
     if [[ ! -f "$RETAIN_FIT" ]]; then
@@ -474,9 +597,8 @@ if stage_enabled wave1; then
     fi
 
     if needs_run "$OUT_DIR/wave1_last6/last6_mp22.pt"; then
-        echo ""
-        echo ">>> [Stage 4a/6] Wave 1a: Last-6 Blocks Margin-Power -2.2 (frozen 55-class head)"
-        run_ul hybrid_unlearn.py \
+        enqueue_branch "stage4a_last6_mp22" \
+            run_ul hybrid_unlearn.py \
             --task-dir "$TASK_DIR" \
             --retain "$RETAIN_FIT" \
             --out "$OUT_DIR/wave1_last6/last6_mp22.pt" \
@@ -503,9 +625,8 @@ if stage_enabled wave1; then
     fi
 
     if needs_run "$OUT_DIR/wave1_last5_patch/last5_patch_mp25.pt"; then
-        echo ""
-        echo ">>> [Stage 4b/6] Wave 1b: Last-5 Blocks + Patch Fragility Tilt + Relative-SSD SalUn"
-        run_ul hybrid_unlearn.py \
+        enqueue_branch "stage4b_last5_patch_mp25" \
+            run_ul hybrid_unlearn.py \
             --task-dir "$TASK_DIR" \
             --retain "$RETAIN_FIT" \
             --out "$OUT_DIR/wave1_last5_patch/last5_patch_mp25.pt" \
@@ -534,9 +655,6 @@ if stage_enabled wave1; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Stage 5: Wave 2 — Diverse Multi-Paradigm Unlearning Branches
-# ---------------------------------------------------------------------------
 if stage_enabled wave2; then
     mkdir -p "$OUT_DIR/wave2_branches" "$OUT_DIR/wave2_kfold"
     if [[ ! -f "$RETAIN_FIT" ]]; then
@@ -545,9 +663,8 @@ if stage_enabled wave2; then
     fi
 
     if needs_run "$OUT_DIR/wave2_branches/branch_full_mp30.pt"; then
-        echo ""
-        echo ">>> [Stage 5a/6] Wave 2a: Full-Backbone Heavy-Tail Margin-Power -3.0"
-        run_ul hybrid_unlearn.py \
+        enqueue_branch "stage5a_branch_full_mp30" \
+            run_ul hybrid_unlearn.py \
             --task-dir "$TASK_DIR" \
             --retain "$RETAIN_FIT" \
             --out "$OUT_DIR/wave2_branches/branch_full_mp30.pt" \
@@ -574,9 +691,8 @@ if stage_enabled wave2; then
     fi
 
     if needs_run "$OUT_DIR/wave2_branches/branch_hybrid_npo_moment.pt"; then
-        echo ""
-        echo ">>> [Stage 5b/6] Wave 2b: Late-MLP/AttnProj + SalUn + Moment + Selective NPO + Smoothness"
-        run_ul hybrid_unlearn.py \
+        enqueue_branch "stage5b_branch_hybrid_npo_moment" \
+            run_ul hybrid_unlearn.py \
             --task-dir "$TASK_DIR" \
             --retain "$RETAIN_FIT" \
             --out "$OUT_DIR/wave2_branches/branch_hybrid_npo_moment.pt" \
@@ -610,7 +726,11 @@ if stage_enabled wave2; then
     else
         echo ">>> [Stage 5b/6] branch_hybrid_npo_moment.pt already exists (set FORCE=1 to rerun)"
     fi
+fi
 
+flush_branch_queue
+
+if stage_enabled wave2; then
     if needs_run "$OUT_DIR/wave2_kfold/merged_best.pt"; then
         echo ""
         echo ">>> [Stage 5c/6] Wave 2c: ${KFOLD_FOLDS}-Fold Cross-Fitted TIES Unlearning (kfold_unlearn.py)"
@@ -698,3 +818,62 @@ if [[ -f "$OUT_DIR/final/soup_submission.pt" ]]; then
     echo " Metrics JSON     : $OUT_DIR/final/soup_metrics.json"
 fi
 echo "=================================================================="
+
+if [[ -f "$OUT_DIR/final/soup_metrics.json" ]]; then
+    "$PY" - "$OUT_DIR" <<'PY'
+import json, sys
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+def load_json(rel):
+    p = out_dir / rel
+    return json.loads(p.read_text()) if p.is_file() else None
+
+rows = []
+for name, rel in [
+    ("wave1_last6", "wave1_last6/last6_mp22.json"),
+    ("wave1_last5_patch", "wave1_last5_patch/last5_patch_mp25.json"),
+    ("wave2_full_mp30", "wave2_branches/branch_full_mp30.json"),
+    ("wave2_npo_moment", "wave2_branches/branch_hybrid_npo_moment.json"),
+]:
+    d = load_json(rel)
+    if d:
+        rows.append((name, d))
+kf = load_json("wave2_kfold/kfold_metrics.json")
+if kf and kf.get("alpha_sweep"):
+    best_kf = max(kf["alpha_sweep"], key=lambda x: x.get("selection_score", -1.0))
+    rows.append((f"wave2_kfold(a={best_kf['alpha']})", best_kf))
+soup_meta = load_json("final/soup_metrics.json")
+if soup_meta:
+    rows.append(("FINAL_SOUP", soup_meta))
+    for sw in soup_meta.get("uniform_gamma_sweep", []):
+        rows.append((f"sweep_g{sw['uniform_gamma']:.2f}", sw))
+
+print("\n" + f"{'Model':26s} | {'Clean CE (u/s)':15s} | {'FgtAcc':6s} | {'RetAcc':6s} | {'RetKL':7s} | {'Act45Acc':8s} | {'Inact55Acc':10s}")
+print("-" * 95)
+print(f"{'REF #2120 (0.0956)':26s} | {'1.600 / 1.550':15s} | {'  --  ':6s} | {'  --  ':6s} | {'  --   ':7s} | {'   --   ':8s} | {'    --    ':10s}")
+for label, m in rows:
+    ce_str = f"{m.get('forget_clean_ce_mean', 0):.3f} / {m.get('forget_clean_ce_std', 0):.3f}"
+    f_acc = f"{m.get('forget_clean_acc', 0):.3f}"
+    r_acc = f"{m.get('retain_acc_sub', float('nan')):.3f}"
+    r_kl = f"{m.get('retain_mean_kl', float('nan')):.4f}"
+    a45 = f"{m.get('active45_retain_acc', float('nan')):.3f}"
+    i55 = f"{m.get('inactive55_retain_acc', float('nan')):.3f}"
+    print(f"{label:26s} | {ce_str:15s} | {f_acc:6s} | {r_acc:6s} | {r_kl:7s} | {a45:8s} | {i55:10s}")
+
+if soup_meta:
+    compact = {
+        k: soup_meta.get(k)
+        for k in (
+            "forget_clean_ce_mean", "forget_clean_ce_std", "forget_clean_acc",
+            "forget_alt_ce_mean", "forget_alt_ce_std", "forget_alt_acc",
+            "retain_score", "retain_acc_sub", "retain_mean_kl",
+            "active45_retain_acc", "active45_retain_kl",
+            "inactive55_retain_acc", "inactive55_retain_kl",
+            "soup_weights", "group_gammas",
+        )
+    }
+    print("\n=== PASTE BACK TO ASSISTANT ===")
+    print(json.dumps(compact, indent=2))
+PY
+fi

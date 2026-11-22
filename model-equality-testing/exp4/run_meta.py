@@ -25,6 +25,10 @@ a = ap.parse_args()
 eps = [e.strip() for e in a.endpoints.split(",") if e.strip()]
 if any(e.startswith("ep-") for e in eps) and not a.allow_ep:
     sys.exit("ep endpoints spend real budget: add --allow-ep if you really mean it")
-lines = [l.rstrip("\n") for l in open(a.prompts, encoding="utf-8") if l.strip()]
-prompts = [(str(i), p) for i, p in enumerate(lines)]
+if a.prompts.endswith(".jsonl"):
+    import json as _j
+    prompts = [(str(r["id"]), r["prompt"]) for r in map(_j.loads, open(a.prompts, encoding="utf-8")) if r]
+else:
+    lines = [l.rstrip("\n") for l in open(a.prompts, encoding="utf-8") if l.strip()]
+    prompts = [(str(i), p) for i, p in enumerate(lines)]
 query_meta(prompts, a.output, eps, a.repeats, a.max_tokens, a.parallel, a.logprobs)

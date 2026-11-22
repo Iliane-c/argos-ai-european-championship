@@ -1,0 +1,5 @@
+id: E167_w2_r50_allfolds
+parent: E143_w2_r50
+# Final-model variant of E143 on all 5 folds (backup line if W8 does not hold). f0 score is in-sample.
+data:
+  train_folds: [0, 1, 2, 3, 4]

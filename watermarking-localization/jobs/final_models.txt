@@ -1,0 +1,6 @@
+# Next wave, queued early so it runs while we analyse: final all-folds models + a second W8 seed.
+#   source scripts/_common.sh && sbatch_node_public finals 05:00:00 jobs/final_models.txt
+configs/E165_w8_allfolds.yaml
+configs/E166_w8_seed1.yaml
+configs/E167_w2_r50_allfolds.yaml
+configs/E168_w8_allfolds_seed1.yaml

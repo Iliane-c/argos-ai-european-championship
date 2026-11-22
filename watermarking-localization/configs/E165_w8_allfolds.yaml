@@ -1,0 +1,6 @@
+id: E165_w8_allfolds
+parent: E160_w8_decoder_loop
+# Final-model variant: E160 trained on all 5 folds (+25 % real data), same 25 epochs.
+# Its f0 score is in-sample and NOT a validation number; judge the recipe by E160, use this for test.
+data:
+  train_folds: [0, 1, 2, 3, 4]

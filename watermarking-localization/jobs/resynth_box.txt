@@ -1,0 +1,4 @@
+# Box-wise re-synthesis for predicted patches (boxes from E151), then fusion with the whole-image z.
+#   source scripts/_common.sh && POST_CMD="python -m wl.finalize output/E151_verify_e143 --kind output/E120_kind_const/kind_probs.npz --resynth --resynth-box" sbatch_node_public rsbox 01:30:00 jobs/resynth_box.txt
+CMD: python -m wl.resynth --split train --device cuda --boxes-from output/E151_verify_e143 --kind output/E120_kind_const/kind_probs.npz
+CMD: python -m wl.resynth --split test --device cuda --boxes-from output/E151_verify_e143 --kind output/E120_kind_const/kind_probs.npz

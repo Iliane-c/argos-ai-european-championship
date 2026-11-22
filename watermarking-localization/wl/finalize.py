@@ -104,9 +104,9 @@ def load_ac_z(split: str, names: list[str]) -> dict[str, np.ndarray]:
     return out
 
 
-def load_resynth(split: str, names: list[str]) -> dict[str, np.ndarray]:
+def load_resynth(split: str, names: list[str], sub: str = "resynth") -> dict[str, np.ndarray]:
     """Differential re-synthesis z-maps from wl.resynth (pixel-level, native scale for `full` images)."""
-    path = ROOT_DIR / "output" / "resynth" / f"{split}.npz"
+    path = ROOT_DIR / "output" / sub / f"{split}.npz"
     if not path.is_file():
         raise SystemExit(f"ERROR: {path} missing; run `python -m wl.resynth --split {split}` first")
     z = np.load(path)
@@ -118,7 +118,8 @@ def load_resynth(split: str, names: list[str]) -> dict[str, np.ndarray]:
 
 
 def build_features(probs: np.ndarray, names: list[str], kind: dict[str, float] | None, zbits: dict[str, np.ndarray] | None,
-                   zdec: dict[str, np.ndarray] | None = None, zres: dict[str, np.ndarray] | None = None) -> np.ndarray:
+                   zdec: dict[str, np.ndarray] | None = None, zres: dict[str, np.ndarray] | None = None,
+                   zbox: dict[str, np.ndarray] | None = None) -> np.ndarray:
     parts = [_logit(probs)[..., None]]
     if kind is not None:
         pf = np.array([kind[n] for n in names], dtype=np.float32)
@@ -133,6 +134,8 @@ def build_features(probs: np.ndarray, names: list[str], kind: dict[str, float] |
         if kind is not None:  # the re-synthesis is at native scale only for `full` images: let it act there
             pf = np.array([kind[n] for n in names], dtype=np.float32)[:, None, None]
             parts.append((zr * pf)[..., None])
+    if zbox is not None:  # box-wise re-synthesis, only filled for predicted patches
+        parts.append((np.clip(np.stack([zbox[n] for n in names]), -10, 10) / 5.0)[..., None])
     return np.concatenate(parts, axis=-1).astype(np.float32)
 
 
@@ -216,6 +219,7 @@ def main() -> None:
     ap.add_argument("--keys", type=int, default=256)
     ap.add_argument("--ac-z", action="store_true", help="Fuse the a-contrario decoder z-maps (wl.acontrario) as evidence")
     ap.add_argument("--mrf", action="store_true", help="Mean-field MRF smoothing of the calibrated beliefs (beta chosen per method, inner CV)")
+    ap.add_argument("--resynth-box", action="store_true", help="Also fuse box-wise re-synthesis z (output/resynth_box)")
     ap.add_argument("--resynth", action="store_true", help="Fuse the re-synthesis matched-filter z-maps (wl.resynth)")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--out", default=None, help="Default: <run>/submission_final.pt")
@@ -234,7 +238,8 @@ def main() -> None:
     v_gts = np.stack([masks_by_name[n] for n in v_names]).astype(np.uint8)
     v_feats = build_features(v_probs.astype(np.float32), v_names, kind_tr, load_bits(args.bits_val, messages, args.keys),
                              load_ac_z("train", v_names) if args.ac_z else None,
-                             load_resynth("train", v_names) if args.resynth else None)
+                             load_resynth("train", v_names) if args.resynth else None,
+                             load_resynth("train", v_names, "resynth_box") if args.resynth_box else None)
 
     scores, group_means = honest_estimate(v_feats, v_gts, v_methods, v_names, mrf=args.mrf)
     kinds = np.array([meta_by_name[n]["kind"] for n in v_names])
@@ -255,7 +260,8 @@ def main() -> None:
     t_probs = t_probs[[pos[n] for n in expected]].astype(np.float32)
     t_feats = build_features(t_probs, expected, kind_te, load_bits(args.bits_test, messages, args.keys),
                              load_ac_z("test", expected) if args.ac_z else None,
-                             load_resynth("test", expected) if args.resynth else None)
+                             load_resynth("test", expected) if args.resynth else None,
+                             load_resynth("test", expected, "resynth_box") if args.resynth_box else None)
     masks = np.stack([eiou_decide(mrf_smooth(cal.predict(t_feats[i], r["method"]), betas[r["method"]]))
                       for i, r in enumerate(test_meta)]).astype(np.uint8)
 
@@ -263,7 +269,7 @@ def main() -> None:
 
     from predict import submit, validate_submission
 
-    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}{'_rs' if args.resynth else ''}{'_mrf' if args.mrf else ''}.pt"
+    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}{'_rs' if args.resynth else ''}{'_rsb' if args.resynth_box else ''}{'_mrf' if args.mrf else ''}.pt"
     torch.save({"image_names": expected, "masks": torch.from_numpy(masks).bool()}, out)
     validate_submission(out, expected)
     frac = masks.mean(axis=(1, 2))

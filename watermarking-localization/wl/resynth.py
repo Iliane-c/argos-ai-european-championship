@@ -77,6 +77,63 @@ def resynth_z(img: np.ndarray, bits: np.ndarray, wm_model, n_keys: int, seed: in
     return ((corr[0] - mu) / sigma).astype(np.float32)
 
 
+def candidate_box(prob: np.ndarray, margin_cells: int = 4, min_cells: int = 8) -> tuple[int, int, int, int] | None:
+    """Bounding box (in 512-px coordinates) of the largest p>=0.5 component, grown by a margin."""
+    from scipy import ndimage
+
+    lab, n = ndimage.label(prob >= 0.5)
+    if n == 0:
+        return None
+    sizes = ndimage.sum(np.ones_like(lab), lab, index=range(1, n + 1))
+    k = int(np.argmax(sizes)) + 1
+    if sizes[k - 1] < 2:
+        return None
+    ys, xs = np.nonzero(lab == k)
+    y0, y1 = max(0, ys.min() - margin_cells), min(GRID, ys.max() + 1 + margin_cells)
+    x0, x1 = max(0, xs.min() - margin_cells), min(GRID, xs.max() + 1 + margin_cells)
+    if (y1 - y0) < min_cells:
+        c = (y0 + y1) // 2; y0, y1 = max(0, c - min_cells // 2), min(GRID, c + min_cells // 2)
+    if (x1 - x0) < min_cells:
+        c = (x0 + x1) // 2; x0, x1 = max(0, c - min_cells // 2), min(GRID, c + min_cells // 2)
+    return y0 * CELL, y1 * CELL, x0 * CELL, x1 * CELL
+
+
+def resynth_box_z(img: np.ndarray, bits: np.ndarray, wm_model, box, n_keys: int, seed: int, win: int = 3) -> np.ndarray:
+    """Re-synthesis inside a candidate box at the box's own scale (how patches were embedded).
+
+    The crop is re-embedded as a whole, like the task's patch generator does, so the template matches
+    the mark at native scale; the z map is written back into the box, zeros elsewhere."""
+    y0, y1, x0, x1 = box
+    crop = np.ascontiguousarray(img[y0:y1, x0:x1])
+    h, w = crop.shape[:2]
+    ph, pw = (-h) % CELL, (-w) % CELL                 # keep cell alignment
+    rng = np.random.default_rng(seed)
+    msgs = [bits] + [rng.integers(0, 2, size=len(bits), dtype=np.uint8) for _ in range(n_keys)]
+    y = crop.astype(np.float32).transpose(2, 0, 1)
+    hy = _highpass(y)
+    nums, dens = [], []
+    for m in msgs:
+        t = wm_model.embed(crop, m).astype(np.float32).transpose(2, 0, 1) - y
+        ht = _highpass(t)
+        prod = np.pad((hy * ht).sum(0), ((0, ph), (0, pw)))
+        tt = np.pad((ht * ht).sum(0), ((0, ph), (0, pw)))
+        gh, gw = prod.shape[0] // CELL, prod.shape[1] // CELL
+        nums.append(prod.reshape(gh, CELL, gw, CELL).sum(axis=(1, 3)))
+        dens.append(tt.reshape(gh, CELL, gw, CELL).sum(axis=(1, 3)))
+    yy = np.pad((hy * hy).sum(0), ((0, ph), (0, pw)))
+    gh, gw = yy.shape[0] // CELL, yy.shape[1] // CELL
+    den_y = yy.reshape(gh, CELL, gw, CELL).sum(axis=(1, 3))
+    num, den = np.stack(nums), np.stack(dens)
+    corr = _box_blur(num, win) / np.sqrt(_box_blur(den, win) * _box_blur(den_y[None], win) + 1e-6)
+    null = corr[1:]
+    mu = null.mean(0)
+    z_box = (corr[0] - mu) / (float(np.std(null - mu[None])) + 1e-6)
+    out = np.zeros((GRID, GRID), dtype=np.float32)
+    cy, cx = y0 // CELL, x0 // CELL
+    out[cy:cy + gh, cx:cx + gw] = z_box[: GRID - cy, : GRID - cx]
+    return out
+
+
 def _stats(names, zs, data_root: Path) -> None:
     from wl.evaluate import load_train_ground_truth
 
@@ -107,6 +164,10 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--methods", nargs="*", default=None)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--boxes-from", default=None,
+                    help="Run dir: for images it predicts as patches, re-synthesise inside its main component box "
+                         "(native patch scale) instead of the whole image. Output goes to output/resynth_box/")
+    ap.add_argument("--kind", default=None, help="kind_probs.npz; with --boxes-from, images with p_full>=0.5 use the whole image")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     args = ap.parse_args()
 
@@ -120,19 +181,39 @@ def main() -> None:
     if args.limit:
         meta = meta[: args.limit]
     models = load_kit_models(sorted({m["method"] for m in meta}), device=args.device)
+    boxes_probs, p_full = {}, {}
+    if args.boxes_from:
+        from wl.evaluate import load_probs
+
+        bn, bp = load_probs(Path(args.boxes_from) / ("val_probs.npz" if args.split == "train" else "test_probs.npz"))
+        boxes_probs = {str(n): p.astype(np.float32) for n, p in zip(bn, bp)}
+        if args.kind:
+            kz = np.load(args.kind)
+            key_n, key_p = ("train_names", "train_p_full_oof") if args.split == "train" else ("test_names", "test_p_full")
+            p_full = {str(n): float(p) for n, p in zip(kz[key_n], kz[key_p])}
+        meta = [m for m in meta if m["image_name"] in boxes_probs]
     names, zs = [], []
     for i, row in enumerate(meta):
         n = row["image_name"]
         img = np.asarray(Image.open(split_dir / "images" / f"{n}.png").convert("RGB"), dtype=np.uint8)
         bits = np.array([int(c) for c in row["message"]], dtype=np.uint8)[: NBITS[row["method"]]]
         seed = int(hashlib.md5(n.encode()).hexdigest()[:8], 16)
-        zs.append(resynth_z(img, bits, models[row["method"]], args.keys, seed, args.win))
+        box = None
+        if args.boxes_from and p_full.get(n, 0.0) < 0.5:
+            box = candidate_box(boxes_probs[n])
+        if box is not None:
+            zs.append(resynth_box_z(img, bits, models[row["method"]], box, args.keys, seed))
+        elif args.boxes_from:
+            zs.append(np.zeros((GRID, GRID), dtype=np.float32))   # full images: covered by the whole-image run
+        else:
+            zs.append(resynth_z(img, bits, models[row["method"]], args.keys, seed, args.win))
         names.append(n)
         if (i + 1) % 50 == 0:
             print(f"[resynth {args.split}] {i + 1}/{len(meta)}", flush=True)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = OUT_DIR.parent / "resynth_box" if args.boxes_from else OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     suffix = "" if not (args.limit or args.methods) else "_partial"
-    out = OUT_DIR / f"{args.split}{suffix}.npz"
+    out = out_dir / f"{args.split}{suffix}.npz"
     np.savez_compressed(out, names=np.array(names), z128=np.stack(zs).astype(np.float16))
     print(f"Wrote {out} ({len(names)} images)")
     if args.split == "train":

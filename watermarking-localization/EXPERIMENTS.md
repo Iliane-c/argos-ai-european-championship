@@ -185,7 +185,7 @@ Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) a
 | Idea | Targets | Evidence that motivates it | Status |
 |---|---|---|---|
 | Differential re-synthesis matched filter (`wl.resynth`): re-embed with true vs random messages, z vs random-message null | PS/TM `full` holes (small-region IoU 0.16–0.18, biggest loss) | `wl.diagnose`; `wl.oracle_k`: even the best size on the current ranking caps at 0.56–0.59, so better evidence is needed | queued |
-| Box-wise re-synthesis for patches (re-embed the candidate crop at native scale) | PS patch (IoU 0.23), TM patch | verify (native-scale decoding) already +0.01; same principle at pixel level | coded only if whole-image resynth shows signal |
+| Box-wise re-synthesis for patches (re-embed the candidate crop at native scale, `wl.resynth --boxes-from`, `finalize --resynth-box`) | PS patch (IoU 0.23), TM patch | verify (native-scale decoding) already +0.01; same principle at pixel level | coded (jobs/resynth_box.txt); launched only if whole-image resynth shows signal |
 | Ensemble of W8 + E143 + E142 with OOF weights, then verify | all | E152 (E143+E142) +0.008; verify +0.010 twice | after W8 finishes |
 | Retrain the finalist on all 5 folds (fixed epochs from CV) | all | +25 % data | if GPU time remains |
 | MRF prior on resynth evidence | holes | MRF useless on smooth CNN maps, expected to help on noisy pixel evidence | runs in the resynth job |

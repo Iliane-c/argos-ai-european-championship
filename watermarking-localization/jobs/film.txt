@@ -1,0 +1,4 @@
+# Structural test: method conditioning (E194) vs its control (E195), both warm-started from E161, then TTA.
+#   source scripts/_common.sh && POST_CMD="python -m wl.infer --run output/E194_w8ns_film_ft --id E194_tta; python -m wl.infer --run output/E195_w8ns_ft_control --id E195_tta" sbatch_node_public film 01:30:00 jobs/film.txt
+configs/E194_w8ns_film_ft.yaml
+configs/E195_w8ns_ft_control.yaml

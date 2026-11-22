@@ -1,0 +1,10 @@
+id: E194_w8ns_film_ft
+parent: E161_w8_noshift
+# Structural change: per-method FiLM on the fused features (zero init), warm start from E161, 8 epochs on
+# folds 1-4 (f0 stays held out -> honest score). Control: E195 (same warm start and schedule, no FiLM).
+model:
+  method_film: true
+train:
+  init_from: output/E161_w8_noshift/best.pt
+  epochs: 8
+  lr: 1.0e-4

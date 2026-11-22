@@ -555,7 +555,7 @@ class W8DecoderInLoopNet(W2WAMMultiTaskNet):
     """
 
     def __init__(self, *args: Any, kit_methods: Sequence[str] = ("pixelseal", "trustmark"), pp_shifts: int = 2,
-                 ev_dim: int = 16, tm_rm: bool = False, **kwargs: Any):
+                 ev_dim: int = 16, tm_rm: bool = False, method_film: bool = False, **kwargs: Any):
         super().__init__(*args, **kwargs)
         feat_dim = self.det_conv.in_channels
         self.tm_rm = bool(tm_rm)
@@ -571,6 +571,11 @@ class W8DecoderInLoopNet(W2WAMMultiTaskNet):
         if self.kind_head is not None:
             self.kind_head = nn.Linear(feat_dim * 2, 1)
         self.gamma = nn.Parameter(torch.tensor(4.0))
+        # Method conditioning (FiLM): PixelSeal, TrustMark and StegaStamp leave very different traces, but the
+        # shared head sees no method id. Zero-initialised, so a warm start reproduces the parent exactly.
+        self.method_film = nn.Embedding(3, 2 * feat_dim) if method_film else None
+        if self.method_film is not None:
+            nn.init.zeros_(self.method_film.weight)
 
     @staticmethod
     def _feat(wm: Any, x: torch.Tensor, nbits: int) -> torch.Tensor:
@@ -651,6 +656,9 @@ class W8DecoderInLoopNet(W2WAMMultiTaskNet):
         feat = self._get_feat128(batch["image"])
         ev, agree_kit = self._evidence(batch, feat)
         fused = self.fuse(torch.cat([feat, ev], dim=1))
+        if self.method_film is not None:
+            g, b = self.method_film(batch["method_id"]).chunk(2, dim=1)
+            fused = fused * (1 + g[:, :, None, None]) + b[:, :, None, None]
         det_logit = self.det_conv(fused).squeeze(1)
         bit_logits = self.bit_conv(fused)
 
@@ -732,6 +740,7 @@ def build_model(cfg: dict[str, Any]) -> nn.Module:
             pp_shifts=int(mcfg.get("pp_shifts", 2)),
             ev_dim=int(mcfg.get("ev_dim", 16)),
             tm_rm=bool(mcfg.get("tm_rm", False)),
+            method_film=bool(mcfg.get("method_film", False)),
         )
     if name == "w3_msg_cond":
         return W3MessageConditionedNet(

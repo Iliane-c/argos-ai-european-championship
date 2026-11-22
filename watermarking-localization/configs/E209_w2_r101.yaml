@@ -1,0 +1,5 @@
+id: E209_w2_r101
+parent: E143_w2_r50
+# Larger encoder on the W2 family (E143 is the 2nd member of every best ensemble): ResNet-101.
+model:
+  encoder: resnet101

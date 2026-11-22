@@ -129,12 +129,12 @@ def render(prob: np.ndarray, box: tuple[int, int, int, int], fill: float, rect_f
     return out
 
 
-def run_split(split, names, meta, sources, kind, verifier, data_root, z_min, rect_fill, log):
+def run_split(split, names, meta, sources, kind, verifier, data_root, z_min, rect_fill, log, methods=None):
     out_probs, decisions = [], {}
     split_dir = Path(data_root) / split
     for n in names:
         base_map = sources[0][n]
-        if kind.get(n, 1.0) >= 0.5:  # full: keep the first source
+        if kind.get(n, 1.0) >= 0.5 or (methods and meta[n]["method"] not in methods):  # full / excluded method
             out_probs.append(base_map)
             continue
         img = np.asarray(Image.open(split_dir / "images" / f"{n}.png").convert("RGB"), dtype=np.uint8)
@@ -186,6 +186,7 @@ def main() -> None:
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--out", default=str(ROOT_DIR / "output"))
     ap.add_argument("--skip-test", action="store_true")
+    ap.add_argument("--methods", nargs="*", default=None, help="Only verify these methods (others keep the first source)")
     args = ap.parse_args()
 
     meta_by_name, masks_by_name = load_train_ground_truth(args.data)
@@ -201,7 +202,7 @@ def main() -> None:
 
     val_src = [load_source(r, "train") for r in runs]
     v_names = sorted(set.intersection(*[set(s) for s in val_src]))
-    v_probs, v_dec = run_split("train", v_names, meta_all, val_src, kind, verifier, args.data, args.z_min, args.rect_fill, print)
+    v_probs, v_dec = run_split("train", v_names, meta_all, val_src, kind, verifier, args.data, args.z_min, args.rect_fill, print, args.methods)
     save_probs(out_dir / "val_probs.npz", v_names, v_probs)
     base = evaluate_predictions(v_names, np.stack([val_src[0][n] for n in v_names]), meta_by_name, masks_by_name, threshold=0.5)
     metrics = evaluate_predictions(v_names, v_probs, meta_by_name, masks_by_name, threshold=0.5)
@@ -220,7 +221,7 @@ def main() -> None:
     if not args.skip_test:
         test_src = [load_source(r, "test") for r in runs]
         t_names = [r["image_name"] for r in test_meta]
-        t_probs, t_dec = run_split("test", t_names, meta_all, test_src, kind, verifier, args.data, args.z_min, args.rect_fill, print)
+        t_probs, t_dec = run_split("test", t_names, meta_all, test_src, kind, verifier, args.data, args.z_min, args.rect_fill, print, args.methods)
         save_probs(out_dir / "test_probs.npz", t_names, t_probs)
         decisions["test"] = t_dec
     (out_dir / "verify.json").write_text(json.dumps(decisions, indent=1) + "\n", encoding="utf-8")

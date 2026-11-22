@@ -91,13 +91,29 @@ class CellCalibrator:
         return 1 / (1 + np.exp(-np.clip(x @ w, -30, 30)))
 
 
-def build_features(probs: np.ndarray, names: list[str], kind: dict[str, float] | None, zbits: dict[str, np.ndarray] | None) -> np.ndarray:
+def load_ac_z(split: str, names: list[str]) -> dict[str, np.ndarray]:
+    """Random-key calibrated decoder z-maps from wl.acontrario (native-scale evidence), per image."""
+    from wl.acontrario import load_ac
+
+    out = {}
+    for n in names:
+        ac = load_ac(split, n)
+        if ac is None:
+            raise SystemExit(f"ERROR: no a-contrario map for {split}/{n}; run `python -m wl.acontrario maps` first")
+        out[n] = ac["z128"]
+    return out
+
+
+def build_features(probs: np.ndarray, names: list[str], kind: dict[str, float] | None, zbits: dict[str, np.ndarray] | None,
+                   zdec: dict[str, np.ndarray] | None = None) -> np.ndarray:
     parts = [_logit(probs)[..., None]]
     if kind is not None:
         pf = np.array([kind[n] for n in names], dtype=np.float32)
         parts.append(np.broadcast_to((2 * pf - 1)[:, None, None, None], probs.shape + (1,)))
     if zbits is not None:
         parts.append(np.clip(np.stack([zbits[n] for n in names]), -10, 10)[..., None] / 5.0)
+    if zdec is not None:
+        parts.append(np.clip(np.stack([zdec[n] for n in names]), -20, 20)[..., None] / 5.0)
     return np.concatenate(parts, axis=-1).astype(np.float32)
 
 
@@ -142,6 +158,7 @@ def main() -> None:
     ap.add_argument("--bits-val", default=None, help="npz with names + bit_logits for the validation images")
     ap.add_argument("--bits-test", default=None, help="npz with names + bit_logits for the test images")
     ap.add_argument("--keys", type=int, default=256)
+    ap.add_argument("--ac-z", action="store_true", help="Fuse the a-contrario decoder z-maps (wl.acontrario) as evidence")
     ap.add_argument("--data", default=str(ROOT_DIR / "data" / "release"))
     ap.add_argument("--out", default=None, help="Default: <run>/submission_final.pt")
     ap.add_argument("--submit", action="store_true")
@@ -157,7 +174,8 @@ def main() -> None:
     v_names = [str(n) for n in v_names]
     v_methods = np.array([meta_by_name[n]["method"] for n in v_names])
     v_gts = np.stack([masks_by_name[n] for n in v_names]).astype(np.uint8)
-    v_feats = build_features(v_probs.astype(np.float32), v_names, kind_tr, load_bits(args.bits_val, messages, args.keys))
+    v_feats = build_features(v_probs.astype(np.float32), v_names, kind_tr, load_bits(args.bits_val, messages, args.keys),
+                             load_ac_z("train", v_names) if args.ac_z else None)
 
     scores, group_means = honest_estimate(v_feats, v_gts, v_methods, v_names)
     kinds = np.array([meta_by_name[n]["kind"] for n in v_names])
@@ -175,21 +193,22 @@ def main() -> None:
     if missing:
         raise SystemExit(f"ERROR: test_probs is missing {len(missing)} images")
     t_probs = t_probs[[pos[n] for n in expected]].astype(np.float32)
-    t_feats = build_features(t_probs, expected, kind_te, load_bits(args.bits_test, messages, args.keys))
+    t_feats = build_features(t_probs, expected, kind_te, load_bits(args.bits_test, messages, args.keys),
+                             load_ac_z("test", expected) if args.ac_z else None)
     masks = np.stack([eiou_decide(cal.predict(t_feats[i], r["method"])) for i, r in enumerate(test_meta)]).astype(np.uint8)
 
     import torch
 
     from predict import submit, validate_submission
 
-    out = Path(args.out) if args.out else run / "submission_final.pt"
+    out = Path(args.out) if args.out else Path("output") / f"final_{run.name}{'_acz' if args.ac_z else ''}.pt"
     torch.save({"image_names": expected, "masks": torch.from_numpy(masks).bool()}, out)
     validate_submission(out, expected)
     frac = masks.mean(axis=(1, 2))
     print(f"Wrote {out} | test images predicted mostly watermarked: {float((frac >= 0.5).mean()):.3f}")
     (run / "finalize.json").write_text(json.dumps({
         "honest_mean": round(float(scores.mean()), 4), "group_std": round(float(np.std(group_means)), 4),
-        "raw_at_0.5": round(raw, 4), "kind": args.kind, "bits": bool(args.bits_val),
+        "raw_at_0.5": round(raw, 4), "kind": args.kind, "bits": bool(args.bits_val), "ac_z": args.ac_z,
         "weights": {m: [round(float(v), 4) for v in w] for m, w in cal.w.items()},
     }, indent=2) + "\n", encoding="utf-8")
     if args.submit:

@@ -101,6 +101,50 @@ The submitted runs used the scratchpad prototype of these scripts, with retentio
 
 At matched clean CE, δ=12 with COCO KD beat δ=10 with CIFAR KD by about 40%, with a heavier loss tail and less KL from the original. The γ sweep peaks near 1.5.
 
+### Follow-ups with the repository script
+
+Each run changes one factor from δ=12, 8 epochs, COCO KD weight 1. Every run is submitted at the γ that matches the previous best clean strength (CE about 1.6). Scores within about ±0.005 of each other are treated as ties.
+
+| Submission | Change | Clean CE mean/std at submitted γ | Public score |
+| --- | --- | ---: | ---: |
+| 1841 | View-ratio δ for altered views, γ=1.7 | 1.69/1.17 | 0.0562 |
+| 1901 | Retention weight 3, γ=1.65 | 1.67/1.14 | 0.0657 |
+| 1937 | Weight 3, 10% per-class confusion prior, γ=1.6 | 1.62/1.02 | 0.0504 |
+| 1998 | Last 6 blocks only, γ=1.5 | 1.55/1.16 | 0.0708 |
+| 1970 | Per-image δ, margin power −0.5, γ=1.5 | 1.58/1.31 | 0.0795 |
+| 2027 | Margin power −1.0, γ=1.5 | 1.60/1.42 | 0.0869 |
+| 2055 | Margin power −1.0, γ=1.7 | — | 0.0845 |
+| 2090 | Margin power −1.5, γ=1.5 | 1.60/1.49 | 0.0920 |
+| **2120** | **Margin power −2.0, γ=1.5** | **1.60/1.55** | **0.0956** |
+
+At a matched mean loss, a heavier loss tail is the only change that kept improving the score. Smoothing the targets, protecting altered views and lowering COCO drift all lowered it. The gold models therefore seem confidently wrong on a subset of forget images, with the atypical low-margin images most affected. Gains from the margin power shrank from 0.010 to 0.004 per step. The best checkpoint is `task3/output/t3-010/mp20_g1.5.pt`.
+
+## T3-011 — In-domain generated retention
+
+The 80/20 forget split showed that forgetting spreads to every image of the 45 forget classes, so control images of those classes drift. COCO and CIFAR retention cannot anchor them. `gen_indomain.py` generates about 5,400 new images of the 45 classes with SDXL-Turbo. The class names were read off the forget set, and the prompts imitate its warm, low-light style. `ssh_t3011.sh` mixes those images with COCO and trains margin power −2.0 and −3.0 in parallel on the two Quadro RTX 8000 GPUs. Turing has no bf16, so training uses fp16 with a gradient scaler. The script then exports γ 1.3, 1.5 and 1.7.
+
+Set `REMOTE` to the server's working directory, then send the inputs from the repository root:
+
+```bash
+REMOTE=user@host:~/t3011
+rsync -avP task3/task_template.py task3/model.pt task3/forget_images.npz task3/coco224.npy "$REMOTE/"
+rsync -avP unlearning/shift_distill.py unlearning/interpolate.py unlearning/gen_indomain.py \
+    unlearning/ssh_t3011.sh "$REMOTE/unlearning/"
+```
+
+On the server, use an environment with `torch`, `timm`, `numpy`, `pillow`, `diffusers`, `transformers` and `accelerate`, plus internet access for the one-time model download of about 7 GB:
+
+```bash
+cd ~/t3011 && bash unlearning/ssh_t3011.sh 2>&1 | tee t3011.log
+```
+
+Bring back the logs first. Then fetch only the checkpoint whose clean CE at γ=1.5 matches the best COCO run (1.60/1.55), at 344 MB per file:
+
+```bash
+rsync -avP "$REMOTE/out/*.log" "$REMOTE/t3011.log" task3/output/t3-011/
+rsync -avP "$REMOTE/out/export/gen_mp20_g1.5.pt" task3/output/t3-011/
+```
+
 ## T3-020 — Hybrid unlearning suite (code-ready, CPU-verified)
 
 Modular multi-paradigm unlearning library (`unlearning/ul/`), 7 CLI entrypoints (`unlearning/*.py`), and JURECA Slurm pipelines (`unlearning/jobs/*.sh`). Implemented locally and verified end-to-end on CPU against a synthetic `TinyViT` task mock; JURECA GPU execution and public scoring remain pending.
@@ -113,4 +157,3 @@ Modular multi-paradigm unlearning library (`unlearning/ul/`), 7 CLI entrypoints 
   4. `sbatch jobs/03_wave1_kfold_and_salun.sh` — 5-fold cross-fitted TIES task-vector unlearning (`kfold_unlearn.py`) + SalUn late-MLP baseline (`hybrid_unlearn.py`)
   5. `sbatch jobs/04_wave2_hybrid_and_branches.sh` — full hybrid branch, LoRA+OGP branch, and L1-prune+heal branch (`hybrid_unlearn.py`)
   6. `sbatch jobs/05_soup_and_eval.sh` — weight-space soup + coordinate layerwise `γ` search (`soup_and_eval.py`)
-

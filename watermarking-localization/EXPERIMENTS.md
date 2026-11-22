@@ -90,7 +90,7 @@ are evaluated on a 128×128 grid.
 | E151 + finalize --mrf | 11-22 | 2 | E151 | Mean-field Ising prior on calibrated beliefs, beta per method chosen by inner CV | Holes/patches are compact | none | f0 | 0.527 | 0.615 | 0.817 | 0.627 | 0.679 | 0.6529 ± 0.014 | | No gain: inner CV picks beta=0 almost always (CNN maps already smooth). Kept for noisy evidence (resynth) |
 | E151 + wl.sizer | 11-22 | 2 | E151 | Size-calibrated top-k: ridge on log region size from image statistics, shrunk to the eiou size | `wl.oracle_k`: true size on the same ranking gives 0.687 vs 0.653 | none | f0 | 0.552 | — | — | — | — | 0.631 | | Rejected (−0.022, negative in 3/5 groups). Ranking, not size, is the ceiling: oracle best-k only 0.56–0.59 on PS/TM holes |
 | E154_resynth | 11-22 | 2 | E151 | `wl.resynth`: re-embed with the true message and 8 random messages, local correlation of high-pass image with templates, z vs the random-message null; fused via `finalize --resynth [--mrf]` | Pixel-level evidence for PS/TM holes (IoU 0.16–0.18 today) | none | f0 | | | | | | | | queued (job 15904930) |
-| E160–E164 (W8) | 11-22 | 2 | E143 | `w8_decoder_loop`: frozen PixelSeal/TrustMark extractors in the forward pass, per-position agreement with the known message (2×2 interleave) fused with learned features. E161 no interleave, E162 PS+TM only, E164 + TrustMark-RM residual | Fixes why E141 failed (evidence constant on synth, misaligned with shifts) | real+synth-v1 | f0 | | | | | | | | running (job 15904808) |
+| E160–E164 (W8) | 11-22 | 2 | E143 | `w8_decoder_loop`: frozen PixelSeal/TrustMark extractors in the forward pass, per-position agreement with the known message (2×2 interleave) fused with learned features. E161 no interleave, E162 PS+TM only, E164 + TrustMark-RM residual | Fixes why E141 failed (evidence constant on synth, misaligned with shifts) | real+synth-v1 | f0 | | | | | | | | running (job 15904808). Epoch 10: E160 0.635 / E161 0.631 vs E143 0.610 at the same epoch (+0.025, gain on PS, TM and SS). E164 ~10 min/epoch (RM at 512 px), ends ~08:00 |
 | E151_verify_e143 | 11-22 | 2 | E143 | `wl.verify` on E143 with E121 boxes, `--methods pixelseal trustmark` | Verification gains (E150) stack on the best model | none | f0 | 0.527 | 0.615 | 0.817 | 0.627 | 0.679 | 0.653 | 0.663 | **Current best** (+0.010 val, +0.009 public). 34 PS/TM patches: 5 confirmed, 8 repaired, 21 untouched |
 | E145_w2_ps_only | 11-22 | 2 | E103 | W2 trained on PixelSeal only (`data.methods: [pixelseal]`) | A specialist lifts the weakest method (PS ~0.50) | real+synth-v1 | f0 | 0.455 | — | — | 0.484 | 0.427 | 0.455 | | Worse than E143 on PS (0.496): less data hurts more than specialisation helps |
 | E143_w2_r50 + finalize (±--ac-z) | 11-22 | 2 | E143 | `wl.finalize` cell calibrator: model logit + kind (+ decoder z), expected-IoU decision, cross-fitted | Product-of-experts fusion of model and decoder evidence | none | f0 | 0.497 | 0.616 | 0.817 | 0.627 | 0.659 | 0.6433 ± 0.040 (0.6431 without z) | | No gain: the model already absorbs the decoder evidence |
@@ -177,6 +177,19 @@ are evaluated on a 128×128 grid.
 | T6 | Post-processing on out-of-fold predictions: thresholds per method × kind, never-empty small part, rectangle snap, morphology, SAM 2 snap | | |
 | T7 | Ensembles and stacking (small CNN on probs + T1 maps, trained out-of-fold) | | |
 | T8 | Region-wise binomial p-values on known-bit agreement (calibrated maps); multi-scale sliding-window decoding + linear probe (SS) | | |
+
+## Ideas queue (what to try next, and why)
+
+Ranked by expected gain; each one is tested out of sample (f0 or cross-fitted) and kept only if it beats the fold noise (~0.01–0.02) and moves the slice it targets.
+
+| Idea | Targets | Evidence that motivates it | Status |
+|---|---|---|---|
+| Differential re-synthesis matched filter (`wl.resynth`): re-embed with true vs random messages, z vs random-message null | PS/TM `full` holes (small-region IoU 0.16–0.18, biggest loss) | `wl.diagnose`; `wl.oracle_k`: even the best size on the current ranking caps at 0.56–0.59, so better evidence is needed | queued |
+| Box-wise re-synthesis for patches (re-embed the candidate crop at native scale) | PS patch (IoU 0.23), TM patch | verify (native-scale decoding) already +0.01; same principle at pixel level | coded only if whole-image resynth shows signal |
+| Ensemble of W8 + E143 + E142 with OOF weights, then verify | all | E152 (E143+E142) +0.008; verify +0.010 twice | after W8 finishes |
+| Retrain the finalist on all 5 folds (fixed epochs from CV) | all | +25 % data | if GPU time remains |
+| MRF prior on resynth evidence | holes | MRF useless on smooth CNN maps, expected to help on noisy pixel evidence | runs in the resynth job |
+| Rejected: size calibration (`wl.sizer`), MRF on E151, `--ac-z` fusion, PixelSeal-only specialist (E145) | — | all negative out of sample, see log | — |
 
 ## Leaderboard submissions
 

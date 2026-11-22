@@ -1,0 +1,6 @@
+id: E208_w8ns_convnext
+parent: E161_w8_noshift
+# Structural: modern ConvNeXt encoder (timm, via smp "tu-"), the family of the PixelSeal extractor
+# (ConvNeXt-v2): large kernels, different inductive bias -> also ensemble diversity.
+model:
+  encoder: tu-convnext_small

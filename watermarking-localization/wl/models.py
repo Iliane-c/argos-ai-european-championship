@@ -517,6 +517,123 @@ class W7DualStreamForensicNet(nn.Module):
         return self.head(fused, batch)
 
 
+_KIT_CACHE: dict[str, dict[str, Any]] = {}  # module-level so EMA deepcopies do not duplicate the extractors
+
+
+def _kit_models(device: torch.device, methods: Sequence[str]) -> dict[str, Any]:
+    key = str(device)
+    if key not in _KIT_CACHE:
+        from wl.features import load_kit_models
+
+        _KIT_CACHE[key] = load_kit_models(list(methods), device=key)
+    return _KIT_CACHE[key]
+
+
+class W8DecoderInLoopNet(W2WAMMultiTaskNet):
+    """W8: W2 + the official extractors run inside the forward pass (frozen).
+
+    E141 fed the decoder evidence as cached maps: constant on synthetic shards and misaligned with the
+    shift augmentation, so the network learned to ignore it. Here the PixelSeal / TrustMark extractors
+    run on the (augmented) input itself, so the evidence is always present and pixel-aligned. Their
+    per-position bit logits are compared with the known message (WAM-style agreement, sub-stride
+    interleaved to a finer grid) and fused with the learned features; a residual path adds the raw
+    agreement to the final logit so training starts from the decoder's own localization.
+    """
+
+    def __init__(self, *args: Any, kit_methods: Sequence[str] = ("pixelseal", "trustmark"), pp_shifts: int = 2,
+                 ev_dim: int = 16, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        feat_dim = self.det_conv.in_channels
+        self.kit_methods = tuple(kit_methods)
+        self.pp_shifts = int(pp_shifts)
+        self.ev_proj = nn.Conv2d(MAX_BITS, ev_dim, kernel_size=1)
+        self.fuse = nn.Sequential(
+            nn.Conv2d(feat_dim + ev_dim + 2, feat_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(feat_dim),
+            nn.ReLU(inplace=True),
+        )
+        if self.kind_head is not None:
+            self.kind_head = nn.Linear(feat_dim * 2, 1)
+        self.gamma = nn.Parameter(torch.tensor(4.0))
+
+    @staticmethod
+    def _feat(wm: Any, x: torch.Tensor, nbits: int) -> torch.Tensor:
+        out = wm.features(x)["per_position_logits"]
+        if out.dim() == 3:  # unbatched output
+            out = out[None]
+        if out.shape[0] != x.shape[0]:  # extractor wrapper only handles one image at a time
+            out = torch.cat([wm.features(x[i : i + 1])["per_position_logits"].reshape(1, *out.shape[-3:]) for i in range(x.shape[0])])
+        return out.float()[:, :nbits].to(x.device)
+
+    @torch.no_grad()
+    def _per_position(self, wm: Any, x: torch.Tensor, nbits: int) -> torch.Tensor:
+        """Per-position bit logits at PP_SHIFTS x finer stride (shift-and-interleave, as in wl.acontrario)."""
+        size = x.shape[-1]
+        pp0 = self._feat(wm, x, nbits)
+        hf, wf = pp0.shape[-2:]
+        s = self.pp_shifts
+        if s <= 1:
+            return pp0
+        sy_step, sx_step = size // hf, size // wf
+        hr = pp0.new_zeros((x.shape[0], nbits, hf * s, wf * s))
+        ar_h = torch.arange(hf, device=x.device)
+        ar_w = torch.arange(wf, device=x.device)
+        for sy in range(s):
+            for sx in range(s):
+                dy, dx = sy * sy_step // s, sx * sx_step // s
+                pp = pp0 if (dy, dx) == (0, 0) else self._feat(wm, torch.roll(x, shifts=(dy, dx), dims=(-2, -1)), nbits)
+                rows = ((ar_h * sy_step + sy_step // 2 - dy) % size) // (sy_step // s)
+                cols = ((ar_w * sx_step + sx_step // 2 - dx) % size) // (sx_step // s)
+                hr[:, :, rows[:, None], cols[None, :]] = pp
+        return hr
+
+    def _evidence(self, batch: dict[str, torch.Tensor], like: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from wl import METHOD_TO_ID, NBITS
+
+        rgb = batch["rgb"]
+        bsz = rgb.shape[0]
+        ev = like.new_zeros((bsz, self.ev_proj.out_channels + 2, GRID, GRID))
+        mid = batch["method_id"]
+        kit = _kit_models(rgb.device, self.kit_methods)
+        for m in self.kit_methods:
+            idx = (mid == METHOD_TO_ID[m]).nonzero(as_tuple=True)[0]
+            if idx.numel() == 0:
+                continue
+            nb = NBITS[m]
+            with torch.autocast(device_type=rgb.device.type, enabled=False):
+                logits = self._per_position(kit[m], rgb[idx].float(), nb)
+            t = torch.tanh(logits * 0.5)
+            prod = t * batch["message_signed"][idx, :nb, None, None].float()
+            agree = prod.mean(dim=1, keepdim=True)
+            strength = t.abs().mean(dim=1, keepdim=True)
+            pad = prod.new_zeros((prod.shape[0], MAX_BITS) + prod.shape[-2:])
+            pad[:, :nb] = prod
+            parts = torch.cat([agree * 4.0, strength, self.ev_proj(pad)], dim=1)
+            ev[idx] = F.interpolate(parts, size=(GRID, GRID), mode="bilinear", align_corners=False).to(ev.dtype)
+        return ev, ev[:, 0] / 4.0
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        feat = self._get_feat128(batch["image"])
+        ev, agree_kit = self._evidence(batch, feat)
+        fused = self.fuse(torch.cat([feat, ev], dim=1))
+        det_logit = self.det_conv(fused).squeeze(1)
+        bit_logits = self.bit_conv(fused)
+
+        signed = batch["message_signed"][:, :, None, None]
+        mask = batch["message_mask"][:, :, None, None]
+        agree = (torch.tanh(bit_logits * 0.5) * signed * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+
+        out: dict[str, torch.Tensor] = {
+            "logits": det_logit + self.alpha * agree + self.gamma * agree_kit + self.beta,
+            "det_logits": det_logit,
+            "bit_logits": bit_logits,
+        }
+        if self.kind_head is not None:
+            pooled = torch.cat([fused.mean(dim=(-2, -1)), fused.amax(dim=(-2, -1))], dim=1)
+            out["kind_logits"] = self.kind_head(pooled).squeeze(1)
+        return out
+
+
 def build_model(cfg: dict[str, Any]) -> nn.Module:
     """Instantiate model from experiment configuration dictionary."""
     mcfg = cfg.get("model", {})
@@ -567,6 +684,18 @@ def build_model(cfg: dict[str, Any]) -> nn.Module:
             encoder_weights=mcfg.get("encoder_weights", "imagenet"),
             feat_dim=int(mcfg.get("feat_dim", 64)),
             heads=heads,
+        )
+    if name == "w8_decoder_loop":
+        return W8DecoderInLoopNet(
+            in_ch=in_ch,
+            backbone_name=str(mcfg.get("backbone", "smp")),
+            encoder=str(mcfg.get("encoder", "resnet50")),
+            encoder_weights=mcfg.get("encoder_weights", "imagenet"),
+            feat_dim=int(mcfg.get("feat_dim", 64)),
+            heads=heads,
+            kit_methods=tuple(mcfg.get("kit_methods", ["pixelseal", "trustmark"])),
+            pp_shifts=int(mcfg.get("pp_shifts", 2)),
+            ev_dim=int(mcfg.get("ev_dim", 16)),
         )
     if name == "w3_msg_cond":
         return W3MessageConditionedNet(

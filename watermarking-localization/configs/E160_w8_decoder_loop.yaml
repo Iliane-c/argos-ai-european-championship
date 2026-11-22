@@ -1,0 +1,11 @@
+id: E160_w8_decoder_loop
+parent: E143_w2_r50
+# One change vs. E143: the frozen PixelSeal / TrustMark extractors run inside the forward pass.
+# Their per-position bit logits are compared with the known message (2x2 sub-stride interleave) and
+# fused with the learned features, plus a residual path on the final logit.
+# Fixes why E141 (cached maps) failed: evidence is present on synth shards and aligned with the shifts.
+model:
+  name: w8_decoder_loop
+  kit_methods: [pixelseal, trustmark]
+  pp_shifts: 2
+  ev_dim: 16

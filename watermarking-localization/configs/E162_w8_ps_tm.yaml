@@ -1,0 +1,5 @@
+id: E162_w8_ps_tm
+parent: E160_w8_decoder_loop
+# Specialist: same model trained and validated on PixelSeal + TrustMark only (the two weak methods).
+data:
+  methods: [pixelseal, trustmark]

@@ -1,0 +1,8 @@
+id: E191_w8ns_lovasz
+parent: E161_w8_noshift
+# One change vs E161: add the Lovasz-hinge loss, a convex surrogate of the Jaccard index
+# (Berman et al., CVPR 2018), i.e. optimise the IoU the task is scored on.
+loss:
+  lovasz: 0.5
+train:
+  seed: 2

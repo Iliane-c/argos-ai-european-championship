@@ -1,0 +1,5 @@
+id: E193_w8ns_seed4
+parent: E161_w8_noshift
+# Third seed of the best recipe: averaging independently trained models is the most reliable gain.
+train:
+  seed: 4

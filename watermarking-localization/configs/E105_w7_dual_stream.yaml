@@ -1,0 +1,34 @@
+id: E105_w7_dual_stream
+parent: base
+data:
+  train: [real, synth-v1]
+  train_folds: [1, 2, 3, 4]
+  val: f0
+  synth_ratio: 0.8
+input:
+  channels: [rgb, srm, agreement]
+model:
+  name: w7_dual_stream
+  sem_backbone: smp
+  arch: Segformer
+  encoder: mit_b2
+  encoder_weights: imagenet
+  feat_dim: 64
+  cond: message
+  heads: [mask, kind]
+loss:
+  bce: 0.4
+  dice: 0.4
+  dual_iou: 1.0
+  lovasz: 0.25
+  boundary: 0.2
+  aux_kind: 0.1
+train:
+  epochs: 30
+  batch: 12
+  lr: 2.0e-4
+post:
+  threshold: oof
+  never_empty: true
+  rect_snap: true
+  tta_shifts: [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]

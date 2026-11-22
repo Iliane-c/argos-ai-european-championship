@@ -1,0 +1,5 @@
+id: E163_w8_seed1
+parent: E160_w8_decoder_loop
+# Second seed of E160 for ensembling and to measure seed noise.
+train:
+  seed: 1

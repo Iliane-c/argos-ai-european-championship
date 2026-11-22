@@ -1,0 +1,23 @@
+id: E104_w3_msg_cond
+parent: base
+data:
+  train: [real, synth-v1]
+  train_folds: [1, 2, 3, 4]
+  val: f0
+  synth_ratio: 0.8
+input:
+  channels: [rgb, srm, agreement]
+model:
+  name: w3_msg_cond
+  backbone: smp
+  arch: Segformer
+  encoder: mit_b2
+  encoder_weights: imagenet
+  feat_dim: 64
+  cond: message
+  heads: [mask, kind]
+train:
+  epochs: 25
+  batch: 16
+  lr: 2.0e-4
+  wrong_msg_prob: 0.2

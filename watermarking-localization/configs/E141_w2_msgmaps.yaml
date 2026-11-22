@@ -1,0 +1,4 @@
+id: E141_w2_msgmaps
+parent: E103_w2_wam_multitask
+input:
+  channels: [rgb, srm, native_view, agreement, matched]

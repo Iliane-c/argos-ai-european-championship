@@ -1,0 +1,26 @@
+id: E103_w2_wam_multitask
+parent: base
+data:
+  train: [real, synth-v1]
+  train_folds: [1, 2, 3, 4]
+  val: f0
+  synth_ratio: 0.8
+input:
+  channels: [rgb, srm, native_view]
+model:
+  name: w2_wam
+  backbone: smp
+  encoder: resnet34
+  encoder_weights: imagenet
+  feat_dim: 64
+  heads: [mask, kind, bits]
+loss:
+  bce: 0.4
+  dice: 0.4
+  dual_iou: 1.0
+  aux_kind: 0.1
+  aux_bits: 0.3
+train:
+  epochs: 25
+  batch: 16
+  lr: 3.0e-4

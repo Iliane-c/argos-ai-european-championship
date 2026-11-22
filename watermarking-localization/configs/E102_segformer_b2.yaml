@@ -1,0 +1,21 @@
+id: E102_segformer_b2
+parent: E101_unet_r34
+input:
+  channels: [rgb, srm]
+model:
+  name: smp
+  arch: Segformer
+  encoder: mit_b2
+  encoder_weights: imagenet
+  cond: method
+  heads: [mask, kind]
+loss:
+  bce: 0.4
+  dice: 0.4
+  dual_iou: 1.0
+  lovasz: 0.3
+  aux_kind: 0.1
+train:
+  epochs: 30
+  batch: 16
+  lr: 2.0e-4

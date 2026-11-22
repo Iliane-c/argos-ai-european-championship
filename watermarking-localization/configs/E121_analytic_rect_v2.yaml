@@ -1,0 +1,16 @@
+id: E121_analytic_rect_v2
+parent: E100_analytic_t1
+# One change vs. the T2 rectangle search: candidate boxes now include thin strips (up to the
+# method's max aspect ratio) and small patches (6-12 cells); refinement keeps the top 5 boxes.
+data:
+  val: all510
+  cache_dir: output/cache/features
+model:
+  name: analytic
+  mode: t2_rect
+  use_kit: true
+  use_matched: false
+post:
+  threshold: oof
+  never_empty: true
+  min_cells: 24

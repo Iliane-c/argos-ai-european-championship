@@ -1,0 +1,5 @@
+id: E161_w8_noshift
+parent: E160_w8_decoder_loop
+# Ablation: no sub-stride interleave (one extractor pass, coarser evidence, 4x cheaper).
+model:
+  pp_shifts: 1

@@ -1,0 +1,6 @@
+# W8 decoder-in-the-loop round (one node, 4 GPUs). Submit from the repo root:
+#   source scripts/_common.sh && sbatch_node_public w8 05:00:00 jobs/w8_round.txt
+configs/E160_w8_decoder_loop.yaml
+configs/E161_w8_noshift.yaml
+configs/E162_w8_ps_tm.yaml
+configs/E164_w8_tmrm.yaml

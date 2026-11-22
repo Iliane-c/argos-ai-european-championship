@@ -1,0 +1,6 @@
+id: E124_segformer_b2_msgmaps
+parent: E102_segformer_b2
+# One change vs. E102: add the message-aware maps (decoder agreement + matched filter) as inputs.
+# Requires the feature cache (output/cache/features/{train,test}).
+input:
+  channels: [rgb, agreement, matched]

@@ -85,9 +85,10 @@ are evaluated on a 128×128 grid.
 | E171 | 11-22 | 1 | E170 | SegFormer-B2 | Direct comparison with E104: gain of synth-v2 + fixes | real+synth-v2 | f0 | | | | | | | | planned |
 | E170 | 11-22 | 1 | E104 | synth-v2 (COCO bases, restore/paste/inpaint holes), no wrong-message negatives, no cached maps, SegFormer-B5 | Data diversity + capacity lift PixelSeal and `full` holes | real+synth-v2 | f0 | | | | | | | | planned |
 | E140_w3_noneg, E141_w3_rgbsrm, E142_w3_b5, E143_w2_40ep | 11-22 | 1 | E104/E103 | Ablations on synth-v1: no negatives; + drop agreement; + SegFormer-B5; W2 40 epochs. Numbers clash with E141_w2_msgmaps / E142_w2_long / E143_w2_r50 below; output dirs differ | The agreement channel is constant on synth and misaligned on real; negatives add label noise | real+synth-v1 | f0 | | | | | | | | running |
-| E151 | 11-22 | 2 | E143 | `wl.verify` on E143 with E121 boxes, `--methods pixelseal trustmark` | Verification gains (E150) stack on the best model | none | f0 | | | | | | | | planned |
-| E145_w2_ps_only | 11-22 | 2 | E103 | W2 trained on PixelSeal only (`data.methods: [pixelseal]`) | A specialist lifts the weakest method (PS ~0.50) | real+synth-v1 | f0 | | | | | | | | planned |
-| E143_w2_r50 + finalize --ac-z | 11-22 | 2 | E143 | `wl.finalize` cell calibrator: model logit + kind + decoder z (a-contrario), expected-IoU decision, cross-fitted | Product-of-experts fusion of model and decoder evidence | none | f0 | | | | | | | | planned |
+| E160–E164 (W8) | 11-22 | 2 | E143 | `w8_decoder_loop`: frozen PixelSeal/TrustMark extractors in the forward pass, per-position agreement with the known message (2×2 interleave) fused with learned features. E161 no interleave, E162 PS+TM only, E164 + TrustMark-RM residual | Fixes why E141 failed (evidence constant on synth, misaligned with shifts) | real+synth-v1 | f0 | | | | | | | | running (job 15904808) |
+| E151_verify_e143 | 11-22 | 2 | E143 | `wl.verify` on E143 with E121 boxes, `--methods pixelseal trustmark` | Verification gains (E150) stack on the best model | none | f0 | 0.527 | 0.615 | 0.817 | 0.627 | 0.679 | 0.653 | 0.663 | **Current best** (+0.010 val, +0.009 public). 34 PS/TM patches: 5 confirmed, 8 repaired, 21 untouched |
+| E145_w2_ps_only | 11-22 | 2 | E103 | W2 trained on PixelSeal only (`data.methods: [pixelseal]`) | A specialist lifts the weakest method (PS ~0.50) | real+synth-v1 | f0 | 0.455 | — | — | 0.484 | 0.427 | 0.455 | | Worse than E143 on PS (0.496): less data hurts more than specialisation helps |
+| E143_w2_r50 + finalize (±--ac-z) | 11-22 | 2 | E143 | `wl.finalize` cell calibrator: model logit + kind (+ decoder z), expected-IoU decision, cross-fitted | Product-of-experts fusion of model and decoder evidence | none | f0 | 0.497 | 0.616 | 0.817 | 0.627 | 0.659 | 0.6433 ± 0.040 (0.6431 without z) | | No gain: the model already absorbs the decoder evidence |
 | E150_verify_e103 | 11-22 | 2 | E103 | `wl.verify`: re-decode candidate boxes at native scale, z vs 256 random keys, coordinate-ascent refinement; keep model map when its own box verifies (z ≥ 4) | Native-scale decoding confirms/repairs patch boxes | none | f0 ∩ all510 | 0.502 | 0.624 | 0.751 | 0.602 | 0.650 | 0.626 | | Helps PS (+0.03) and TM, hurts SS: apply to PS/TM only |
 | E143_w2_r50 | 11-22 | 2 | E103 | W2 with ResNet-50 encoder | More capacity for faint PixelSeal / holes | real+synth-v1 | f0 | 0.496 | 0.616 | 0.817 | 0.627 | 0.659 | 0.643 | | **Best single model** (OOF 0.6456) |
 | E142_w2_long | 11-22 | 2 | E103 | W2, 50 epochs | E103 under-trained | real+synth-v1 | f0 | | | | | | | | running (job 15904353) |
@@ -179,7 +180,8 @@ are evaluated on a 128×128 grid.
 | 11-22 | 1 | E103_w2_wam_multitask | 0.621 / — | 0.621 | backup in `/p/scratch/training2666/chander2/argos/submissions` |
 | 11-22 | 2 | E120_kind_const | 0.452 (honest all510) | 0.4451 | below best, leaderboard unchanged |
 | 11-22 | 2 | E102_segformer_b2 | 0.407 / OOF 0.432 | 0.4239 | below best |
-| 11-22 | 2 | E143_w2_r50 | 0.643 / OOF 0.646 | pending | next submission |
+| 11-22 | 2 | E143_w2_r50 | 0.643 / OOF 0.646 | 0.654 | new best at the time |
+| 11-22 | 2 | E151_verify_e143 | 0.653 / OOF-postproc 0.657 | 0.663 | **current best** |
 
 ## Decisions
 
